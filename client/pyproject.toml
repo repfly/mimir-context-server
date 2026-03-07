@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "mimir-client"
 version = "1.0.0"
 description = "Lightweight MCP proxy client for remote Mimir context servers — no repos, no models, no indexing needed"
-readme = "../README.md"
+readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 keywords = ["mcp", "context", "code", "llm", "proxy", "mimir"]
