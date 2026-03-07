@@ -17,8 +17,8 @@ RUN pip install --no-cache-dir --upgrade pip
 COPY pyproject.toml ./
 COPY mimir/ ./mimir/
 
-# Install application + tree-sitter-languages (required for parsing, not in pyproject.toml)
-RUN pip install --no-cache-dir . tree-sitter-languages
+# Install application and all dependencies
+RUN pip install --no-cache-dir .
 
 # Pre-download the standard embedding model
 # This caches model weights into the Docker layer so the container runs 100% offline

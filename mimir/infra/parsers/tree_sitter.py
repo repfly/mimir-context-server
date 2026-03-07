@@ -93,22 +93,34 @@ class TreeSitterParser:
         if self._initialized:
             return
         try:
-            import tree_sitter_languages  # noqa: F401
+            self._get_parser_fn = self._resolve_parser_fn()
             self._initialized = True
         except ImportError:
             logger.warning(
-                "tree-sitter-languages not installed. "
-                "Install with: pip install tree-sitter-languages"
+                "No tree-sitter language pack installed. "
+                "Install with: pip install tree-sitter-language-pack"
             )
+            self._get_parser_fn = None
             self._initialized = True  # prevent repeated warnings
+
+    @staticmethod
+    def _resolve_parser_fn():
+        """Return get_parser from whichever package is available."""
+        try:
+            from tree_sitter_language_pack import get_parser
+            return get_parser
+        except ImportError:
+            from tree_sitter_languages import get_parser
+            return get_parser
 
     def _get_parser(self, language: str):
         """Get or create a tree-sitter parser for the given language."""
         if language in self._parsers:
             return self._parsers[language]
+        if not self._get_parser_fn:
+            return None
         try:
-            from tree_sitter_languages import get_parser
-            parser = get_parser(language)
+            parser = self._get_parser_fn(language)
             self._parsers[language] = parser
             return parser
         except Exception as exc:

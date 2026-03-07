@@ -28,6 +28,7 @@ def run_mcp_server(config: MimirConfig, workspace_name: str | None = None) -> No
     _ws_label = workspace_name or "default"
     container = Container(config)
     graph = container.load_graph()
+    container.warmup()
     logger.info(
         "MCP server starting — workspace=%s, graph has %d nodes",
         _ws_label, graph.node_count,

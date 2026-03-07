@@ -38,38 +38,6 @@ Mimir indexes your code into a hierarchical graph of repositories, files, classe
 
 ---
 
-## Architecture
-
-```
-┌─ Adapters ────────────────────────────────────────────────┐
-│  CLI (Typer)  ·  MCP Server (stdio)  ·  HTTP Server       │
-│  Remote MCP Proxy  ·  Web Inspector                       │
-└───────────────────────────┬───────────────────────────────┘
-                            │
-┌─ Services ────────────────┼───────────────────────────────┐
-│  IndexingService  ·  RetrievalService                      │
-│  TemporalService  ·  SessionService                        │
-└───────────────────────────┬───────────────────────────────┘
-                            │
-┌─ Ports (Interfaces) ──────┼───────────────────────────────┐
-│  Embedder  ·  VectorStore  ·  GraphStore  ·  Parser        │
-│  LlmClient  ·  SessionStore                                │
-└───────────────────────────┬───────────────────────────────┘
-                            │
-┌─ Infrastructure ──────────┼───────────────────────────────┐
-│  TreeSitterParser (Python, TS, Go, Java, Rust, C/C++,      │
-│                    Ruby, Swift, Kotlin, C#, TOML, YAML)    │
-│  LocalEmbedder (sentence-transformers, offline)            │
-│  NumpyVectorStore / ChromaDB                               │
-│  SqliteGraphStore / SqliteSessionStore                     │
-│  LiteLlmClient (optional, for LLM summaries)               │
-└───────────────────────────────────────────────────────────┘
-```
-
-Dependency injection via `Container` — all ports are wired from `MimirConfig` at startup. Zero global state.
-
----
-
 ## Quick Start
 
 ```bash
@@ -105,7 +73,6 @@ pip install mimir-context-server
 ### Client only (lightweight)
 
 ```bash
-# ~2 deps (aiohttp + typer), no ML models, no tree-sitter, no indexing
 pipx install mimir-client
 ```
 

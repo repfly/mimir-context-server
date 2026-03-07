@@ -201,7 +201,7 @@ def run_web_server(config: MimirConfig, port: int = 8420) -> None:
     async def index(request: web.Request) -> web.FileResponse:
         return web.FileResponse(_STATIC_DIR / "index.html")
 
-    routes.static("/static", _STATIC_DIR)
+    routes.static("/static", _STATIC_DIR, append_version=True)
 
     # ------------------------------------------------------------------
     # CORS middleware

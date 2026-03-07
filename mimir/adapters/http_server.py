@@ -311,6 +311,9 @@ def run_http_server(
     app = web.Application(middlewares=[cors_middleware])
     app.router.add_routes(routes)
 
+    # Eagerly load embedding model so first query is instant
+    container.warmup()
+
     logger.info("Shared Mimir HTTP server listening on http://%s:%d", host, port)
     web.run_app(app, host=host, port=port, print=lambda _: None, access_log=None)
 

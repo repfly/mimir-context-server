@@ -188,6 +188,13 @@ class Container:
         logger.info("Data cleared: %s", cleared)
         return {"cleared": cleared}
 
+    def warmup(self) -> None:
+        """Eagerly load the embedding model so the first query is fast."""
+        if hasattr(self.embedder, '_ensure_model'):
+            logger.info("Warming up embedding model…")
+            self.embedder._ensure_model()
+            logger.info("Embedding model ready.")
+
     def close(self) -> None:
         """Release all resources."""
         self.graph_store.close()
