@@ -1,0 +1,34 @@
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+.env/
+
+# Packaging / build
+build/
+dist/
+*.egg-info/
+
+# App data
+.mimir/
+
+# Local / personal configs
+mimir-self.toml
+
+# Example repos (local test fixtures)
+example-*/
+
+# IDE
+.vscode/
+.idea/

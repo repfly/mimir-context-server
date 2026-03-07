@@ -1,0 +1,35 @@
+# Mimir v1 — Test Configuration
+
+[[repos]]
+name = "example-shop"
+path = "./example-shop"
+language_hint = "python"
+
+[[repos]]
+name = "click"
+path = "./example-click"
+language_hint = "python"
+
+[indexing]
+summary_mode = "llm"
+concurrency = 4
+excluded_patterns = ["__pycache__", ".git", "*.pyc", "node_modules", "venv", ".venv", "*.egg-info", "dist", "build"]
+max_file_size_kb = 500
+
+[llm]
+model = "ollama/qwen2.5-coder:7b"
+
+[embeddings]
+model = "all-mpnet-base-v2"
+
+[vector_db]
+backend = "numpy"
+
+[retrieval]
+default_beam_width = 3
+default_token_budget = 8000
+expansion_hops = 2
+
+[temporal]
+recency_lambda = 0.02
+co_retrieval_enabled = true
