@@ -2,7 +2,9 @@
 
 > *In Norse mythology, Mimir was the wisest being in all the Nine Realms — guardian of the Well of Wisdom beneath Yggdrasil, the World Tree. Odin sacrificed his eye for a single drink from that well. **Mimir** brings that same depth of knowledge to your codebase.*
 
+[![PyPI](https://img.shields.io/pypi/v/mimir-context-server)](https://pypi.org/project/mimir-context-server/)
 [![Python](https://img.shields.io/pypi/pyversions/mimir-context-server)](https://pypi.org/project/mimir-context-server/)
+[![PyPI - Client](https://img.shields.io/pypi/v/mimir-server-client?label=mimir-server-client)](https://pypi.org/project/mimir-server-client/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **Mimir** is an intelligent context engine that helps LLMs understand large, multi-repo codebases. Instead of dumping raw files into a prompt, Mimir builds a semantic code graph, ranks nodes by relevance and recency, and assembles a minimal, connected, token-budget-aware context bundle — exactly what the model needs, nothing it doesn't.
@@ -58,7 +60,7 @@ There are two packages — pick the one that matches your role:
 | Package | Install | Who needs it |
 |---|---|---|
 | `mimir-context-server` | `pipx install mimir-context-server` | **Server operators** — devs who index repos and run the server (local or shared) |
-| `mimir-client` | `pipx install mimir-client` | **Client devs** — devs who query a remote server without any repos locally |
+| `mimir-server-client` | `pipx install mimir-server-client` | **Client devs** — devs who query a remote server without any repos locally |
 
 ### Server (full install)
 
@@ -73,7 +75,7 @@ pip install mimir-context-server
 ### Client only (lightweight)
 
 ```bash
-pipx install mimir-client
+pipx install mimir-server-client
 ```
 
 ### Docker (server, zero Python setup)
@@ -313,7 +315,7 @@ mimir serve --http --config /repos/mimir.toml
 No repos to clone. Install the lightweight client and configure your IDE:
 
 ```bash
-pipx install mimir-client
+pipx install mimir-server-client
 ```
 
 Then add to your MCP config:
@@ -483,7 +485,7 @@ docker run -p 8421:8421 -v /repos:/project mimir-server
 All developers install the lightweight client and connect:
 
 ```bash
-pipx install mimir-client
+pipx install mimir-server-client
 ```
 
 ```json
@@ -600,7 +602,7 @@ Global flags:
   --verbose   / -v          Enable debug logging
 ```
 
-### `mimir-client` (client package: `mimir-client`)
+### `mimir-client` (client package: `mimir-server-client`)
 
 ```
 mimir-client serve <URL>    Start local MCP proxy to a remote Mimir server
@@ -624,7 +626,7 @@ The client package has only 2 dependencies (`aiohttp`, `typer`) and does not req
 │   ├── infra/                  # Implementations (tree-sitter, embedders, SQLite, ChromaDB)
 │   ├── adapters/               # External interfaces (CLI, MCP, HTTP, web UI)
 │   └── container.py            # Dependency injection wiring
-├── client/                     # Client package (mimir-client)
+├── client/                     # Client package (mimir-server-client)
 │   └── mimir_client/           # Lightweight MCP proxy + health check CLI
 ├── tests/                      # Test suite
 ├── Dockerfile                  # Server container with pre-baked embedding model

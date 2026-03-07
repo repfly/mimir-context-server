@@ -1,13 +1,17 @@
-# mimir-client
+# mimir-server-client
 
-Lightweight MCP proxy client for remote [Mimir](https://github.com/repfly/mimir) context servers.
+[![PyPI](https://img.shields.io/pypi/v/mimir-server-client)](https://pypi.org/project/mimir-server-client/)
+[![Python](https://img.shields.io/pypi/pyversions/mimir-server-client)](https://pypi.org/project/mimir-server-client/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/repfly/mimir-context-server/blob/main/LICENSE)
+
+Lightweight MCP proxy client for remote [Mimir](https://github.com/repfly/mimir-context-server) context servers.
 
 No repos, no models, no indexing needed. Just point at a running Mimir HTTP server and get instant MCP access in your IDE.
 
 ## Install
 
 ```bash
-pipx install mimir-client
+pipx install mimir-server-client
 ```
 
 ## Usage
