@@ -1,7 +1,12 @@
 FROM python:3.11-slim
 
-# Install system dependencies required for parsing and git operations
-RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+# Install system dependencies: git for repo operations, build-essential for native extensions
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+# Fix for "dubious ownership" error in mounted volumes
+RUN git config --global --add safe.directory '*'
 
 WORKDIR /app
 
@@ -12,22 +17,32 @@ RUN pip install --no-cache-dir --upgrade pip
 COPY pyproject.toml ./
 COPY mimir/ ./mimir/
 
-# Install application
-RUN pip install --no-cache-dir .
+# Install application + tree-sitter-languages (required for parsing, not in pyproject.toml)
+RUN pip install --no-cache-dir . tree-sitter-languages
 
 # Pre-download the standard embedding model
-# This caches model weights into the Docker layer so the container runs fast and 100% offline
+# This caches model weights into the Docker layer so the container runs 100% offline
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-mpnet-base-v2')"
 
-# Fast and fully offline hugging face configuration
+# Remove build tools to shrink final image
+RUN apt-get purge -y build-essential && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
+# Offline hugging face mode
 ENV HF_HUB_OFFLINE=1
 ENV PYTHONPATH=/app
 
-# Define standard mount path for codebases
-VOLUME ["/project"]
+# Mount points: /project for source repos, /data for persistent index
+VOLUME ["/project", "/data"]
 WORKDIR /project
 
-# Using mimir CLI as the default executable
-ENTRYPOINT ["mimir"]
-# Executing serve (MCP server) by default
-CMD ["serve", "--config", "mimir.toml"]
+# Expose the HTTP server port
+EXPOSE 8421
+
+# Health check for orchestrators (K8s, ECS, Docker Compose)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8421/api/v1/health')" || exit 1
+
+# Entrypoint handles index-then-serve workflow
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+CMD ["auto"]

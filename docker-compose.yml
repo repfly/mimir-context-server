@@ -1,0 +1,19 @@
+services:
+  mimir:
+    build: .
+    ports:
+      - "8421:8421"
+    volumes:
+      # Mount the directory containing mimir.toml and the repos it references
+      - ./:/project
+      # Persistent index data survives container restarts
+      - mimir-data:/project/.mimir
+    environment:
+      - MIMIR_CONFIG=mimir.toml
+      # Set AUTO_INDEX=1 to index on every container start (useful for CI/cron)
+      # Default "auto" CMD always indexes; use CMD ["serve"] to skip
+      - AUTO_INDEX=0
+    restart: unless-stopped
+
+volumes:
+  mimir-data:
