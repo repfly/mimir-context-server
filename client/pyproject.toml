@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0", "wheel>=0.46"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mimir-client"
+name = "mimir-server-client"
 version = "1.0.0"
 description = "Lightweight MCP proxy client for remote Mimir context servers — no repos, no models, no indexing needed"
 readme = "README.md"
