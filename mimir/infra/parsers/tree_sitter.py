@@ -84,6 +84,25 @@ _NAME_TYPES = frozenset({
     "simple_identifier", "field_identifier",
 })
 
+# Common keywords across languages — excluded from identifier extraction
+_KEYWORDS = frozenset({
+    "if", "else", "elif", "for", "while", "do", "switch", "case", "break",
+    "continue", "return", "try", "catch", "except", "finally", "throw",
+    "throws", "raise", "with", "as", "is", "in", "not", "and", "or",
+    "true", "false", "True", "False", "nil", "null", "None", "self",
+    "this", "super", "var", "let", "val", "const", "static", "final",
+    "def", "func", "fun", "fn", "function", "async", "await", "yield",
+    "class", "struct", "enum", "protocol", "interface", "trait", "impl",
+    "import", "from", "package", "module", "use", "using", "include",
+    "public", "private", "protected", "internal", "open", "fileprivate",
+    "override", "abstract", "virtual", "sealed", "new", "delete",
+    "void", "int", "str", "string", "bool", "float", "double", "char",
+    "print", "println", "printf", "guard", "where", "some", "any",
+    "get", "set", "init", "deinit", "map", "filter", "reduce",
+    "throws", "rethrows", "mutating", "nonmutating", "lazy", "weak",
+    "unowned", "required", "optional", "convenience", "inout", "typealias",
+})
+
 
 class TreeSitterParser:
     """Parser implementation backed by tree-sitter.
@@ -309,6 +328,71 @@ class TreeSitterParser:
                     text = text.decode("utf-8")
                 decorators.append(text.strip())
         return decorators
+
+    # ------------------------------------------------------------------
+    # Identifier extraction (for cross-file symbol resolution)
+    # ------------------------------------------------------------------
+
+    def extract_identifiers(
+        self,
+        code: str,
+        language: Optional[str] = None,
+        file_path: Optional[str] = None,
+    ) -> set[str]:
+        """Extract all identifier tokens from a code snippet.
+
+        Uses tree-sitter AST to get clean identifiers, skipping
+        strings, comments, and keywords.  Falls back to regex if
+        no grammar is available.
+        """
+        self._ensure_init()
+
+        lang = language
+        if not lang and file_path:
+            ext = os.path.splitext(file_path)[1].lower()
+            lang = _EXT_TO_LANG.get(ext)
+        if not lang:
+            return self._extract_identifiers_regex(code)
+
+        parser = self._get_parser(lang)
+        if parser is None:
+            return self._extract_identifiers_regex(code)
+
+        try:
+            tree = parser.parse(code.encode("utf-8"))
+            identifiers: set[str] = set()
+            self._walk_identifiers(tree.root_node, identifiers)
+            return identifiers
+        except Exception:
+            return self._extract_identifiers_regex(code)
+
+    def _walk_identifiers(self, node, out: set[str]) -> None:
+        """Recursively collect identifier tokens, skipping noise."""
+        # Skip string literals and comments entirely
+        if node.type in (
+            "string", "string_literal", "template_string", "raw_string_literal",
+            "comment", "line_comment", "block_comment", "multiline_comment",
+        ):
+            return
+
+        if node.type in _NAME_TYPES:
+            text = node.text
+            if isinstance(text, bytes):
+                text = text.decode("utf-8")
+            # Skip very short identifiers (i, j, x, etc.) and keywords
+            if len(text) > 1 and text not in _KEYWORDS:
+                out.add(text)
+
+        for child in node.children:
+            self._walk_identifiers(child, out)
+
+    @staticmethod
+    def _extract_identifiers_regex(code: str) -> set[str]:
+        """Regex fallback for identifier extraction."""
+        import re
+        tokens = set(re.findall(r'\b[A-Za-z_]\w*\b', code))
+        # Filter out very short tokens and common keywords
+        return {t for t in tokens if len(t) > 1 and t not in _KEYWORDS}
 
     # ------------------------------------------------------------------
     # Regex fallback (no grammar available)

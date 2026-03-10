@@ -67,3 +67,16 @@ class Parser(Protocol):
     def supported_extensions(self) -> frozenset[str]:
         """File extensions this parser can handle (e.g. ``{".py", ".pyi"}``)."""
         ...
+
+    def extract_identifiers(
+        self,
+        code: str,
+        language: Optional[str] = None,
+        file_path: Optional[str] = None,
+    ) -> set[str]:
+        """Extract all identifier tokens from a code snippet.
+
+        Used by cross-file symbol resolution to find references
+        between symbols.  Returns a set of identifier strings.
+        """
+        ...

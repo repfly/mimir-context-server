@@ -129,6 +129,8 @@ class Container:
 
     def _hydrate_vector_store(self, graph) -> None:
         """Populate the in-memory vector store from graph node embeddings."""
+        from mimir.services.indexing import IndexingService
+
         ids: list[str] = []
         embeddings: list[list[float]] = []
         metadatas: list[dict] = []
@@ -144,7 +146,7 @@ class Container:
                     "path": node.path or "",
                     "last_modified": node.last_modified or "",
                 })
-                documents.append(node.raw_code or node.summary or node.name)
+                documents.append(IndexingService._embedding_text(node, graph))
 
         if ids:
             self.vector_store.upsert(

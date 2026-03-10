@@ -50,10 +50,11 @@ class IndexingService:
         """Run the full indexing pipeline.
 
         1. Parse all repos → build CodeGraph
-        2. Detect cross-repo links
-        3. Generate summaries (based on mode)
-        4. Embed nodes
-        5. Store in vector DB and SQLite
+        2. Cross-file symbol resolution (CALLS, USES_TYPE, INHERITS edges)
+        3. Cross-repo link detection (API contracts, shared imports)
+        4. Generate summaries (based on mode)
+        5. Embed nodes
+        6. Store in vector DB and SQLite
         """
         mode = mode_override or self._config.indexing.summary_mode
         logger.info("Starting full index — mode=%s, repos=%d", mode, len(self._config.repos))
@@ -65,7 +66,10 @@ class IndexingService:
             logger.info("Indexing repo: %s (%s)", repo_config.name, repo_config.path)
             await self._index_repo(graph, repo_config)
 
-        # Phase 2: Cross-repo link detection
+        # Phase 2: Cross-file symbol resolution
+        self._resolve_cross_file_refs(graph)
+
+        # Phase 3: Cross-repo link detection
         if self._config.cross_repo.detect_api_contracts:
             self._detect_api_contracts(graph)
         if self._config.cross_repo.detect_shared_imports:
@@ -73,7 +77,7 @@ class IndexingService:
 
         logger.info("Graph built: %s", graph.stats())
 
-        # Phase 3: Summarization (mode-dependent)
+        # Phase 4: Summarization (mode-dependent)
         if mode == "heuristic":
             self._generate_heuristic_summaries(graph)
         elif mode == "llm":
@@ -81,10 +85,10 @@ class IndexingService:
                 raise IndexingError("LLM client required for llm mode but not configured")
             await self._generate_llm_summaries(graph)
 
-        # Phase 4: Embedding
+        # Phase 5: Embedding
         await self._embed_graph(graph, mode)
 
-        # Phase 5: Persist
+        # Phase 6: Persist
         self._graph_store.save(graph)
 
         # Save commit hashes for incremental updates
@@ -372,24 +376,27 @@ class IndexingService:
             except Exception:
                 pass
 
-        # Phase 4: Re-detect cross-repo links (on full graph)
+        # Phase 4: Re-resolve cross-file refs (on full graph)
+        self._resolve_cross_file_refs(graph)
+
+        # Phase 5: Re-detect cross-repo links (on full graph)
         if self._config.cross_repo.detect_api_contracts:
             self._detect_api_contracts(graph)
         if self._config.cross_repo.detect_shared_imports:
             self._detect_shared_imports(graph)
 
-        # Phase 5: Summarisation for new/changed nodes only
+        # Phase 6: Summarisation for new/changed nodes only
         if mode == "heuristic":
             for node in all_new_nodes:
                 node.summary = self._heuristic_summary(node, graph)
         elif mode == "llm" and self._llm_client is not None:
             await self._generate_llm_summaries_for_nodes(graph, all_new_nodes)
 
-        # Phase 6: Embed new/changed nodes only
+        # Phase 7: Embed new/changed nodes only
         if all_new_nodes:
-            await self._embed_nodes(all_new_nodes, mode)
+            await self._embed_nodes(all_new_nodes, mode, graph)
 
-        # Phase 7: Persist delta
+        # Phase 8: Persist delta
         if all_stale_ids:
             self._graph_store.delete_nodes_by_ids(all_stale_ids)
             self._vector_store.delete(all_stale_ids)
@@ -410,7 +417,7 @@ class IndexingService:
                     if src and tgt and (src.repo == repo_config.name or tgt.repo == repo_config.name):
                         full_edges.append(e)
             if full_nodes:
-                await self._embed_nodes(full_nodes, mode)
+                await self._embed_nodes(full_nodes, mode, graph)
                 self._graph_store.save_partial(full_nodes, full_edges)
 
         total_removed = len(all_stale_ids)
@@ -768,6 +775,155 @@ class IndexingService:
                     ))
 
     # ------------------------------------------------------------------
+    # Cross-file symbol resolution
+    # ------------------------------------------------------------------
+
+    def _resolve_cross_file_refs(self, graph: CodeGraph) -> int:
+        """Scan every symbol's code for references to other known symbols.
+
+        Creates CALLS, USES_TYPE, and INHERITS edges across files.
+        Language-agnostic: uses tree-sitter identifier extraction
+        (with regex fallback) and matches against the symbol name index.
+
+        Returns the number of new edges created.
+        """
+        from mimir.domain.lang import detect_language
+
+        # Guard: if the parser doesn't support identifier extraction, use regex fallback
+        if not hasattr(self._parser, 'extract_identifiers'):
+            logger.warning("Parser does not support extract_identifiers — skipping cross-file resolution")
+            return 0
+
+        # 1. Build name → [node] index (only symbols, not containers)
+        name_index: dict[str, list[Node]] = {}
+        for node in graph.all_nodes():
+            if node.is_symbol:
+                name_index.setdefault(node.name, []).append(node)
+
+        # Skip very common names that would cause excessive false positives.
+        # A name that appears in >20 nodes is likely too generic (e.g. "init").
+        ambiguous_names = {
+            name for name, nodes in name_index.items()
+            if len(nodes) > 20
+        }
+
+        # 2. For each symbol, extract identifiers from raw_code and resolve
+        edges_created = 0
+        seen_edges: set[tuple[str, str, str]] = set()  # (source, target, kind)
+
+        # Collect all existing non-CONTAINS edges to avoid duplicates
+        for edge in graph.all_edges():
+            if edge.kind != EdgeKind.CONTAINS:
+                seen_edges.add((edge.source, edge.target, edge.kind.value))
+
+        for node in graph.all_nodes():
+            if not node.is_symbol or not node.raw_code:
+                continue
+
+            # Extract identifiers from code
+            lang = detect_language(node.path) if node.path else None
+            identifiers = self._parser.extract_identifiers(
+                node.raw_code, language=lang, file_path=node.path,
+            )
+
+            # Also check for inheritance in the signature line
+            inherits_names = self._detect_inheritance(node)
+
+            for ident in identifiers:
+                if ident == node.name:
+                    continue  # skip self-reference
+                if ident in ambiguous_names:
+                    continue
+
+                targets = name_index.get(ident)
+                if not targets:
+                    continue
+
+                for target in targets:
+                    # Skip self-references
+                    if target.id == node.id:
+                        continue
+
+                    # Determine edge kind
+                    if ident in inherits_names:
+                        edge_kind = EdgeKind.INHERITS
+                    elif target.kind in (NodeKind.CLASS, NodeKind.TYPE):
+                        edge_kind = EdgeKind.USES_TYPE
+                    else:
+                        edge_kind = EdgeKind.CALLS
+
+                    edge_key = (node.id, target.id, edge_kind.value)
+                    if edge_key in seen_edges:
+                        continue
+                    seen_edges.add(edge_key)
+
+                    graph.add_edge(Edge(
+                        source=node.id,
+                        target=target.id,
+                        kind=edge_kind,
+                    ))
+                    edges_created += 1
+
+        logger.info("Cross-file resolution: %d new edges created", edges_created)
+        return edges_created
+
+    @staticmethod
+    def _detect_inheritance(node: Node) -> set[str]:
+        """Extract type names from a class/struct/enum signature that
+        indicate inheritance, conformance, or implementation.
+
+        Language-agnostic: looks for common patterns in the first line:
+          class Foo(Bar, Baz)         — Python
+          class Foo : Bar, Baz        — Swift, Kotlin, C#
+          class Foo extends Bar       — Java, JS/TS
+          class Foo implements Bar    — Java
+          struct Foo : Protocol       — Swift
+          type Foo struct { embedded } — Go (handled separately)
+        """
+        import re
+
+        if node.kind not in (NodeKind.CLASS, NodeKind.TYPE):
+            return set()
+
+        sig = node.signature or ""
+        if not sig:
+            # Use the first line of raw_code
+            if node.raw_code:
+                sig = node.raw_code.split("\n", 1)[0]
+            else:
+                return set()
+
+        names: set[str] = set()
+
+        # Pattern 1: parenthesised bases — class Foo(Bar, Baz):
+        m = re.search(r'\(\s*([^)]+)\)', sig)
+        if m:
+            for part in m.group(1).split(","):
+                # Strip generics, default args, etc.
+                base = re.split(r'[<\[\(=]', part.strip())[0].strip()
+                if base and re.match(r'^[A-Z]\w*$', base):
+                    names.add(base)
+
+        # Pattern 2: colon-separated — class Foo : Bar, Baz
+        m = re.search(r'(?:class|struct|enum|protocol|interface)\s+\w+\s*:\s*(.+?)(?:\{|where|$)', sig)
+        if m:
+            for part in m.group(1).split(","):
+                base = re.split(r'[<\[\(]', part.strip())[0].strip()
+                if base and re.match(r'^[A-Z]\w*$', base):
+                    names.add(base)
+
+        # Pattern 3: extends / implements keywords
+        for kw in ("extends", "implements"):
+            m = re.search(rf'{kw}\s+([\w,\s<>]+?)(?:\{{|implements|$)', sig)
+            if m:
+                for part in m.group(1).split(","):
+                    base = re.split(r'[<\[\(]', part.strip())[0].strip()
+                    if base and re.match(r'^[A-Z]\w*$', base):
+                        names.add(base)
+
+        return names
+
+    # ------------------------------------------------------------------
     # Summarisation
     # ------------------------------------------------------------------
 
@@ -896,6 +1052,38 @@ class IndexingService:
     # Embedding
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _embedding_text(node: Node, graph: CodeGraph) -> str:
+        """Build grounded text for embedding a node.
+
+        Symbols use their raw code.  Containers use a concatenation of
+        their path, children's signatures/names, and (if available) a
+        short LLM summary — so the embedding is always anchored in real
+        identifiers and never dominated by a potentially hallucinated
+        summary.
+        """
+        if node.is_symbol:
+            return node.raw_code or node.signature or node.name
+
+        # Container: build from grounded content
+        parts: list[str] = []
+
+        # Path carries semantic signal (e.g. "Features/Home/HomeView.swift")
+        if node.path:
+            parts.append(node.path)
+
+        # Children's signatures / names
+        children = graph.get_children(node.id)
+        for child in children[:30]:
+            sig = child.signature or child.name
+            parts.append(sig)
+
+        # Append summary as minority signal (not dominant)
+        if node.summary and len(parts) > 0:
+            parts.append(node.summary[:500])
+
+        return "\n".join(parts) if parts else node.name
+
     async def _embed_graph(self, graph: CodeGraph, mode: str) -> None:
         """Embed all nodes and upsert into vector store."""
         from mimir.domain.models import SYMBOL_KINDS
@@ -908,7 +1096,7 @@ class IndexingService:
             if mode == "none" and not node.is_symbol:
                 continue  # none mode: only embed leaf symbols
 
-            text = node.raw_code if node.is_symbol else node.summary
+            text = self._embedding_text(node, graph)
             if text:
                 texts.append(text[:4000])  # cap text length
                 nodes.append(node)
@@ -962,7 +1150,7 @@ class IndexingService:
 
         logger.info("Embedded and stored %d vectors", len(ids))
 
-    async def _embed_nodes(self, nodes_to_embed: list[Node], mode: str) -> None:
+    async def _embed_nodes(self, nodes_to_embed: list[Node], mode: str, graph: Optional[CodeGraph] = None) -> None:
         """Embed a specific list of nodes and upsert into vector store.
 
         Unlike ``_embed_graph`` which iterates the entire graph, this only
@@ -974,7 +1162,7 @@ class IndexingService:
         for node in nodes_to_embed:
             if mode == "none" and not node.is_symbol:
                 continue
-            text = node.raw_code if node.is_symbol else node.summary
+            text = self._embedding_text(node, graph) if graph else (node.raw_code or node.summary or node.name)
             if text:
                 texts.append(text[:4000])
                 nodes.append(node)
