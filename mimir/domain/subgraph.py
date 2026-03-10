@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+from mimir.domain.lang import detect_language
 from mimir.domain.models import Edge, Node
 
 
@@ -125,7 +126,8 @@ class ContextBundle:
                     elif edge.target == node.id:
                         annotations.append(f"CALLED BY: {edge.source.split('::')[-1]}")
 
-                parts.append(f"```python")
+                lang = detect_language(node.path)
+                parts.append(f"```{lang}")
                 parts.append(f"# {location}")
                 if annotations:
                     parts.append(f"# {' | '.join(annotations[:5])}")

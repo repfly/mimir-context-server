@@ -84,8 +84,9 @@ class ChromaVectorStore:
                 metadatas = results["metadatas"][0] if results["metadatas"] else [{}] * len(ids)
 
                 for vec_id, dist, meta in zip(ids, distances, metadatas):
-                    # ChromaDB returns distances (lower = better), convert to similarity
-                    score = 1.0 - dist
+                    # ChromaDB cosine space returns distances in [0, 2].
+                    # Convert to similarity in [0, 1]: sim = 1 - (dist / 2)
+                    score = max(0.0, 1.0 - dist / 2.0)
                     output.append(VectorSearchResult(id=vec_id, score=score, metadata=meta or {}))
 
             return output

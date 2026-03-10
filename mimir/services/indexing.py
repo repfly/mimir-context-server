@@ -20,6 +20,7 @@ from mimir.domain.models import Edge, EdgeKind, Node, NodeKind
 from mimir.ports.embedder import Embedder
 from mimir.ports.graph_store import GraphStore
 from mimir.ports.llm_client import LlmClient
+from mimir.domain.lang import detect_language
 from mimir.ports.parser import Parser, Symbol
 from mimir.ports.vector_store import VectorStore
 
@@ -864,13 +865,17 @@ class IndexingService:
     @staticmethod
     def _build_summary_prompt(node: Node, graph: CodeGraph) -> str:
         """Build a prompt for LLM summarization."""
+        lang = detect_language(node.path) or "unknown"
+        location = f"{node.repo}/{node.path}" if node.path else node.repo
+
         parts = [
-            f"Summarize this {node.kind.value} in 2-3 sentences. "
-            "Focus on what it does, its dependencies, and its role in the codebase.",
+            f"Summarize this {node.kind.value} from `{location}` ({lang}) in 2-3 sentences. "
+            "Be specific about what the code does based on its actual content. "
+            "Do not speculate about frameworks or technologies not evident in the code.",
             "",
         ]
         if node.raw_code:
-            parts.append(f"```\n{node.raw_code[:2000]}\n```")
+            parts.append(f"```{lang}\n{node.raw_code[:2000]}\n```")
         elif node.is_container:
             children = graph.get_children(node.id)
             children_info = ", ".join(c.name for c in children[:20])
