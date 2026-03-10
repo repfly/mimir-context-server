@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
+# HF_HUB_OFFLINE is set dynamically in _ensure_model after first download
 for _noisy in (
     "sentence_transformers",
     "sentence_transformers.models.transformer",
@@ -43,7 +43,17 @@ class LocalEmbedder:
             return
         try:
             from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer(self._model_name, cache_folder=self._cache_dir)
+
+            # Allow first download, then enforce offline mode for subsequent loads
+            try:
+                os.environ["HF_HUB_OFFLINE"] = "1"
+                self._model = SentenceTransformer(self._model_name, cache_folder=self._cache_dir)
+            except OSError:
+                logger.info("Model '%s' not cached — downloading for the first time...", self._model_name)
+                os.environ.pop("HF_HUB_OFFLINE", None)
+                self._model = SentenceTransformer(self._model_name, cache_folder=self._cache_dir)
+                os.environ["HF_HUB_OFFLINE"] = "1"
+
             # Probe dimension quietly
             test = self._model.encode(["test"], show_progress_bar=False)
             self._dim = len(test[0])
