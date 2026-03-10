@@ -441,10 +441,39 @@ class IndexingService:
         )
         graph.add_node(repo_node)
 
-        # Walk files
+        # Walk files — module nodes are created lazily so directories
+        # that contain no parseable code never appear in the graph.
         modules_seen: dict[str, str] = {}  # module path → node id
         files_indexed = 0
         symbols_indexed = 0
+
+        def _ensure_module(rel_dir: str) -> str:
+            """Create module node (and ancestors) on demand, return its id."""
+            if not rel_dir:
+                return f"{repo_name}:"
+            if rel_dir in modules_seen:
+                return modules_seen[rel_dir]
+
+            # Ensure parent exists first
+            parent_dir = os.path.dirname(rel_dir)
+            parent_id = _ensure_module(parent_dir)
+
+            module_id = f"{repo_name}:{rel_dir}/"
+            module_node = Node(
+                id=module_id,
+                repo=repo_name,
+                kind=NodeKind.MODULE,
+                name=os.path.basename(rel_dir),
+                path=rel_dir,
+            )
+            graph.add_node(module_node)
+            modules_seen[rel_dir] = module_id
+            graph.add_edge(Edge(
+                source=parent_id,
+                target=module_id,
+                kind=EdgeKind.CONTAINS,
+            ))
+            return module_id
 
         for root, dirs, files in os.walk(str(repo_path)):
             # Filter excluded directories
@@ -456,29 +485,6 @@ class IndexingService:
             rel_dir = os.path.relpath(root, str(repo_path))
             if rel_dir == ".":
                 rel_dir = ""
-
-            # Create module node for directory
-            if rel_dir:
-                module_id = f"{repo_name}:{rel_dir}/"
-                if module_id not in modules_seen:
-                    module_node = Node(
-                        id=module_id,
-                        repo=repo_name,
-                        kind=NodeKind.MODULE,
-                        name=os.path.basename(rel_dir),
-                        path=rel_dir,
-                    )
-                    graph.add_node(module_node)
-                    modules_seen[rel_dir] = module_id
-
-                    # Link to parent
-                    parent_dir = os.path.dirname(rel_dir)
-                    parent_id = modules_seen.get(parent_dir, f"{repo_name}:")
-                    graph.add_edge(Edge(
-                        source=parent_id,
-                        target=module_id,
-                        kind=EdgeKind.CONTAINS,
-                    ))
 
             for filename in files:
                 if self._is_excluded(filename):
@@ -521,8 +527,8 @@ class IndexingService:
                 graph.add_node(file_node)
                 files_indexed += 1
 
-                # Link file to module/repo
-                parent_id = modules_seen.get(rel_dir, f"{repo_name}:")
+                # Link file to module/repo (creates module node if needed)
+                parent_id = _ensure_module(rel_dir)
                 graph.add_edge(Edge(
                     source=parent_id,
                     target=file_id,

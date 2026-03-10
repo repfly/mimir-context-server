@@ -1,8 +1,8 @@
 """Tree-sitter based source code parser.
 
-Fallback (and often primary) parser that uses tree-sitter grammars to
-extract symbols from source files.  Supports Python, TypeScript/JavaScript,
-Go, Java, Rust, C/C++.
+Language-agnostic symbol extraction: any tree-sitter node whose type
+contains "declaration", "definition", or "item" and that has an
+identifier child is treated as a symbol.  No per-language config needed.
 """
 
 from __future__ import annotations
@@ -42,40 +42,47 @@ _EXT_TO_LANG: dict[str, str] = {
     ".yaml": "yaml",
     ".yml": "yaml",
     ".json": "json",
+    ".lua": "lua",
+    ".php": "php",
+    ".scala": "scala",
+    ".zig": "zig",
+    ".ex": "elixir",
+    ".exs": "elixir",
+    ".hs": "haskell",
+    ".ml": "ocaml",
+    ".mli": "ocaml",
+    ".r": "r",
+    ".R": "r",
+    ".dart": "dart",
+    ".v": "v",
+    ".jl": "julia",
 }
 
-# Node types that represent symbols we want to extract per language
-_SYMBOL_QUERIES: dict[str, dict[str, str]] = {
-    "python": {
-        "function": "function_definition",
-        "class": "class_definition",
-        "method": "function_definition",  # inside a class
-    },
-    "javascript": {
-        "function": "function_declaration",
-        "class": "class_declaration",
-        "method": "method_definition",
-    },
-    "typescript": {
-        "function": "function_declaration",
-        "class": "class_declaration",
-        "method": "method_definition",
-    },
-    "go": {
-        "function": "function_declaration",
-        "method": "method_declaration",
-        "type": "type_declaration",
-    },
-    "java": {
-        "function": "method_declaration",
-        "class": "class_declaration",
-    },
-    "rust": {
-        "function": "function_item",
-        "class": "struct_item",
-        "method": "function_item",
-    },
-}
+# Suffixes that indicate a node is a symbol declaration/definition
+_DECL_SUFFIXES = ("_declaration", "_definition", "_item")
+
+# Node types to always skip (noise, not real symbols)
+_SKIP_TYPES = frozenset({
+    "expression_statement", "assignment", "variable_declaration",
+    "lexical_declaration", "short_var_declaration", "const_declaration",
+    "let_declaration", "var_declaration", "field_declaration",
+    "parameter", "parameter_declaration", "argument_list",
+    "import_declaration", "import_statement", "include_statement",
+    "package_declaration", "comment", "line_comment", "block_comment",
+    "ERROR",
+})
+
+# Node type substrings that indicate a function-like symbol
+_FUNC_HINTS = ("function", "method", "func", "constructor", "initializer")
+# Node type substrings that indicate a class/type-like symbol
+_CLASS_HINTS = ("class", "struct", "enum", "protocol", "interface",
+                "trait", "impl", "type", "module", "namespace", "object")
+
+# Child node types that carry the symbol name
+_NAME_TYPES = frozenset({
+    "identifier", "name", "type_identifier", "property_identifier",
+    "simple_identifier", "field_identifier",
+})
 
 
 class TreeSitterParser:
@@ -151,14 +158,36 @@ class TreeSitterParser:
 
         parser = self._get_parser(lang)
         if parser is None:
-            # Fallback: extract minimal info without grammar
-            return self._extract_minimal(file_path, source, lang)
+            return self._extract_minimal(file_path, source)
 
         try:
             tree = parser.parse(source.encode("utf-8"))
             return self._extract_symbols(tree.root_node, source, file_path, lang)
         except Exception as exc:
             raise ParsingError(file_path, f"tree-sitter parse failed: {exc}") from exc
+
+    # ------------------------------------------------------------------
+    # Generic AST extraction
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _classify_node(node_type: str) -> Optional[str]:
+        """Return 'function', 'class', or None based on the node type string."""
+        if node_type in _SKIP_TYPES:
+            return None
+
+        # Must look like a declaration / definition / item
+        if not any(node_type.endswith(s) for s in _DECL_SUFFIXES):
+            return None
+
+        lowered = node_type.lower()
+        if any(h in lowered for h in _FUNC_HINTS):
+            return "function"
+        if any(h in lowered for h in _CLASS_HINTS):
+            return "class"
+
+        # Catch-all: still a declaration, treat as function
+        return "function"
 
     def _extract_symbols(
         self,
@@ -167,47 +196,34 @@ class TreeSitterParser:
         file_path: str,
         language: str,
     ) -> list[Symbol]:
-        """Walk the AST and extract symbol definitions."""
+        """Walk the AST and extract symbol definitions (language-agnostic)."""
         symbols: list[Symbol] = []
         lines = source.split("\n")
-        relative_path = file_path  # caller converts to relative
 
-        queries = _SYMBOL_QUERIES.get(language, {})
-        func_types = {queries.get("function"), queries.get("method")} - {None}
-        class_types = {queries.get("class")} - {None}
-        type_types = {queries.get("type")} - {None}
+        def walk(node, inside_class: bool = False):
+            kind = self._classify_node(node.type)
 
-        def walk(node, parent_class: Optional[str] = None):
-            node_type = node.type
-
-            if node_type in func_types:
+            if kind == "function":
                 sym = self._node_to_symbol(
-                    node, lines, relative_path, language,
-                    kind="method" if parent_class else "function",
+                    node, lines, file_path, language,
+                    kind="method" if inside_class else "function",
                 )
                 if sym:
                     symbols.append(sym)
 
-            elif node_type in class_types:
+            elif kind == "class":
                 sym = self._node_to_symbol(
-                    node, lines, relative_path, language, kind="class",
+                    node, lines, file_path, language, kind="class",
                 )
                 if sym:
                     symbols.append(sym)
-                # Recurse into class body to find methods
+                # Recurse into body to find methods
                 for child in node.children:
-                    walk(child, parent_class=sym.name if sym else None)
+                    walk(child, inside_class=True)
                 return  # don't double-recurse
 
-            elif node_type in type_types:
-                sym = self._node_to_symbol(
-                    node, lines, relative_path, language, kind="type",
-                )
-                if sym:
-                    symbols.append(sym)
-
             for child in node.children:
-                walk(child, parent_class)
+                walk(child, inside_class)
 
         walk(root_node)
         return symbols
@@ -221,10 +237,9 @@ class TreeSitterParser:
         kind: str,
     ) -> Optional[Symbol]:
         """Convert a tree-sitter node to a Symbol."""
-        # Find the name child
         name = None
         for child in node.children:
-            if child.type in ("identifier", "name", "type_identifier", "property_identifier"):
+            if child.type in _NAME_TYPES:
                 name = child.text.decode("utf-8") if isinstance(child.text, bytes) else child.text
                 break
 
@@ -235,13 +250,9 @@ class TreeSitterParser:
         end_line = node.end_point[0] + 1
         code = "\n".join(lines[start_line - 1 : end_line])
 
-        # Extract signature (first line of the definition)
         signature = lines[start_line - 1].strip() if start_line <= len(lines) else None
 
-        # Extract docstring (language-specific)
         docstring = self._extract_docstring(node, lines, language)
-
-        # Extract decorators
         decorators = self._extract_decorators(node, lines)
 
         return Symbol(
@@ -256,10 +267,14 @@ class TreeSitterParser:
             decorators=decorators,
         )
 
+    # ------------------------------------------------------------------
+    # Docstring / decorator helpers
+    # ------------------------------------------------------------------
+
     def _extract_docstring(self, node, lines: list[str], language: str) -> Optional[str]:
         """Extract docstring from AST node."""
+        # Python: expression_statement > string inside block
         if language == "python":
-            # Python docstrings are expression_statement > string children
             for child in node.children:
                 if child.type == "block":
                     for block_child in child.children:
@@ -269,52 +284,66 @@ class TreeSitterParser:
                                     text = expr_child.text
                                     if isinstance(text, bytes):
                                         text = text.decode("utf-8")
-                                    # Strip quote marks
                                     return text.strip("\"'").strip()
+
+        # Generic: look for a comment node immediately before or as first child
+        for child in node.children:
+            if child.type in ("comment", "line_comment", "block_comment"):
+                text = child.text
+                if isinstance(text, bytes):
+                    text = text.decode("utf-8")
+                return text.lstrip("/#* ").rstrip("* /").strip()
+            # Stop at the first non-comment child
+            if child.type not in ("decorator", "attribute"):
+                break
+
         return None
 
     def _extract_decorators(self, node, lines: list[str]) -> list[str]:
-        """Extract decorator names from AST node."""
+        """Extract decorator / attribute names from AST node."""
         decorators: list[str] = []
         for child in node.children:
-            if child.type == "decorator":
+            if child.type in ("decorator", "attribute"):
                 text = child.text
                 if isinstance(text, bytes):
                     text = text.decode("utf-8")
                 decorators.append(text.strip())
         return decorators
 
+    # ------------------------------------------------------------------
+    # Regex fallback (no grammar available)
+    # ------------------------------------------------------------------
+
     def _extract_minimal(
         self,
         file_path: str,
         source: str,
-        language: str,
     ) -> list[Symbol]:
-        """Regex-based minimal extraction when no grammar is available."""
+        """Regex-based minimal extraction when no grammar is available.
+
+        Uses generic patterns that work across most C-family and
+        scripting languages.
+        """
         import re
         symbols: list[Symbol] = []
         lines = source.split("\n")
 
-        # Python-style function/class detection
-        patterns = {
-            "python": [
-                (r"^\s*def\s+(\w+)", "function"),
-                (r"^\s*class\s+(\w+)", "class"),
-                (r"^\s*async\s+def\s+(\w+)", "function"),
-            ],
-            "javascript": [
-                (r"^\s*function\s+(\w+)", "function"),
-                (r"^\s*class\s+(\w+)", "class"),
-                (r"^\s*(?:export\s+)?const\s+(\w+)\s*=.*=>", "function"),
-            ],
-        }
+        # Generic patterns that cover most languages
+        generic_patterns = [
+            # function/method: func/def/fn/fun keyword
+            (r"^\s*(?:(?:pub(?:lic)?|priv(?:ate)?|prot(?:ected)?|internal|open|fileprivate|static|async|override|final|abstract|virtual)\s+)*"
+             r"(?:func|def|fn|fun|function)\s+(\w+)", "function"),
+            # class-like: class/struct/enum/protocol/interface/trait
+            (r"^\s*(?:(?:pub(?:lic)?|priv(?:ate)?|prot(?:ected)?|internal|open|fileprivate|static|final|abstract|sealed)\s+)*"
+             r"(?:class|struct|enum|protocol|interface|trait|object)\s+(\w+)", "class"),
+        ]
 
-        for pattern, kind in patterns.get(language, []):
+        for pattern, kind in generic_patterns:
             for i, line in enumerate(lines):
                 match = re.match(pattern, line)
                 if match:
                     name = match.group(1)
-                    # Find end of block (rough: next non-indented line)
+                    # Find end of block (rough heuristic)
                     end = i + 1
                     if i + 1 < len(lines):
                         indent = len(line) - len(line.lstrip())
