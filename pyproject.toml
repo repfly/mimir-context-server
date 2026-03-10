@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel>=0.46"]
+requires = ["setuptools>=68.0", "wheel>=0.46", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "mimir-context-server"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Mimir — Context Server: intelligent code context engine for LLMs working with large, multi-repo codebases"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -66,6 +66,9 @@ include = ["mimir*"]
 
 [tool.setuptools.package-data]
 "mimir.adapters.web" = ["static/**/*"]
+
+[tool.setuptools_scm]
+version_scheme = "no-guess-dev"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
