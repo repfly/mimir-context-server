@@ -162,14 +162,31 @@ class MimirConfig:
 
             data_dir = path.parent.joinpath(Path(raw.get("data_dir", ".mimir")).expanduser()).resolve()
 
+            # Resolve relative paths in sub-configs against config file dir
+            config_dir = path.parent
+
+            vector_db = _parse_section(VectorDbConfig, raw.get("vector_db", {}))
+            if vector_db.persist_directory and not Path(vector_db.persist_directory).is_absolute():
+                object.__setattr__(
+                    vector_db, "persist_directory",
+                    str(config_dir.joinpath(vector_db.persist_directory).resolve()),
+                )
+
+            embeddings = _parse_section(EmbeddingConfig, raw.get("embeddings", {}))
+            if embeddings.cache_dir and not Path(embeddings.cache_dir).is_absolute():
+                object.__setattr__(
+                    embeddings, "cache_dir",
+                    str(config_dir.joinpath(embeddings.cache_dir).resolve()),
+                )
+
             return cls(
                 repos=repos,
                 data_dir=data_dir,
                 cross_repo=_parse_section(CrossRepoConfig, raw.get("cross_repo", {})),
                 indexing=_parse_section(IndexingConfig, raw.get("indexing", {})),
                 llm=_parse_section(LlmConfig, raw.get("llm", {})),
-                embeddings=_parse_section(EmbeddingConfig, raw.get("embeddings", {})),
-                vector_db=_parse_section(VectorDbConfig, raw.get("vector_db", {})),
+                embeddings=embeddings,
+                vector_db=vector_db,
                 retrieval=_parse_section(RetrievalConfig, raw.get("retrieval", {})),
                 temporal=_parse_section(TemporalConfig, raw.get("temporal", {})),
                 session=_parse_section(SessionConfig, raw.get("session", {})),
