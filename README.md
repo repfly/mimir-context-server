@@ -7,7 +7,7 @@
 [![PyPI - Client](https://img.shields.io/pypi/v/mimir-server-client?label=mimir-server-client)](https://pypi.org/project/mimir-server-client/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Mimir** is an intelligent context engine that helps LLMs understand large, multi-repo codebases. Instead of dumping raw files into a prompt, Mimir builds a semantic code graph, ranks nodes by relevance and recency, and assembles a minimal, connected, token-budget-aware context bundle — exactly what the model needs, nothing it doesn't.
+**Mimir** is an intelligent context engine that helps LLMs understand large, multi-repo codebases. Instead of dumping raw files into a prompt, Mimir builds a semantic code graph with real cross-file dependency edges, ranks nodes by relevance and recency, and assembles a minimal, connected, token-budget-aware context bundle — exactly what the model needs, nothing it doesn't.
 
 ---
 
@@ -21,13 +21,16 @@ When you ask Claude or GPT to help with a large codebase, you face a brutal choi
 
 ## The Solution
 
-Mimir indexes your code into a hierarchical graph of repositories, files, classes, and functions. Every node is embedded semantically. At query time, a beam search traverses the graph to find the tightest connected subgraph that answers your question — within your token budget.
+Mimir indexes your code into a hierarchical graph of repositories, files, classes, and functions. Cross-file dependencies — function calls, type references, inheritance hierarchies — are resolved into typed edges. Every node is embedded semantically using grounded code context. At query time, a hybrid search (semantic + BM25 keyword + name/path matching) finds seed nodes, and a beam search traverses the graph to assemble the tightest connected subgraph that answers your question — within your token budget.
 
 ---
 
 ## Key Features
 
 - **Hierarchical beam search** — finds connected code paths, not isolated snippets
+- **Cross-file symbol resolution** — automatically discovers `CALLS`, `USES_TYPE`, and `INHERITS` edges across files using tree-sitter AST analysis
+- **Hybrid search** — combines semantic embeddings, BM25 keyword matching, and name/path scoring for precise retrieval
+- **Live file watching** — monitors your repos for changes and re-indexes on every save, keeping the graph up to date without manual re-indexing
 - **Subgraph expansion** — automatically surfaces callers, callees, type definitions, and config references
 - **Temporal reranking** — recently and frequently changed code scores higher
 - **Session deduplication** — code already sent to the LLM is summarised or omitted on subsequent turns
@@ -111,14 +114,10 @@ path = "/path/to/my-frontend"
 language_hint = "typescript"
 
 [indexing]
-summary_mode = "heuristic"   # none | heuristic | llm
+summary_mode = "heuristic"   # none | heuristic
 excluded_patterns = ["__pycache__", "node_modules", ".git", "venv", ".venv"]
 max_file_size_kb = 500
 concurrency = 10
-
-[llm]
-model = "claude-haiku-4-5-20251001"    # only needed for summary_mode = "llm"
-api_key_env = "ANTHROPIC_API_KEY"
 
 [embeddings]
 model = "all-mpnet-base-v2"  # local, offline, no API keys needed
@@ -142,22 +141,31 @@ co_retrieval_enabled = true
 [session]
 context_decay_turns = 5
 topic_tracking_alpha = 0.3
+
+[watcher]
+enabled = false              # set to true or use --watch flag
+debounce_ms = 1000           # ms to wait after last file event before processing
+batch_window_ms = 2000       # max ms to accumulate changes before forcing a flush
 ```
 
 ### Configuration Reference
 
 | Section | Key | Default | Description |
 |---|---|---|---|
-| `indexing` | `summary_mode` | `heuristic` | `none` = raw code only; `heuristic` = signatures + docstrings; `llm` = LLM-generated summaries |
+| `indexing` | `summary_mode` | `heuristic` | `none` = raw code only; `heuristic` = signatures, docstrings, and dependency info |
 | `indexing` | `max_file_size_kb` | `500` | Skip files larger than this |
 | `indexing` | `concurrency` | `10` | Parallel file parsing limit |
 | `embeddings` | `model` | `jina-embeddings-v2-base-code` | Any sentence-transformers model or Jina API model |
 | `vector_db` | `backend` | `numpy` | `numpy` for dev/small projects; `chroma` for persistent production use |
 | `retrieval` | `default_token_budget` | `8000` | Maximum tokens per context bundle |
 | `retrieval` | `expansion_hops` | `2` | How many graph hops to expand from seed nodes |
+| `retrieval` | `hybrid_alpha` | `0.7` | Weight between semantic (1.0) and BM25 keyword (0.0) search |
 | `retrieval` | `relevance_gate` | `0.3` | Minimum score to include expanded nodes |
 | `temporal` | `recency_lambda` | `0.02` | Exponential decay rate for recency scoring |
 | `session` | `context_decay_turns` | `5` | Turns before previously-sent code is re-included fully |
+| `watcher` | `enabled` | `false` | Enable live file watching for automatic re-indexing |
+| `watcher` | `debounce_ms` | `1000` | Debounce delay after the last file event |
+| `watcher` | `batch_window_ms` | `2000` | Maximum time to accumulate changes before flushing |
 
 ---
 
@@ -166,22 +174,35 @@ topic_tracking_alpha = 0.3
 ### Indexing Pipeline
 
 ```
-Source files → TreeSitter parse → Nodes & Edges → CodeGraph (NetworkX)
-    → Cross-repo link detection → Summarize (heuristic/llm)
-    → Embed all nodes → Persist to SQLite + VectorStore
+Source files → Tree-sitter parse → Nodes & Edges → CodeGraph (NetworkX)
+    → Cross-file symbol resolution (CALLS, USES_TYPE, INHERITS)
+    → Heuristic summaries → Embed all nodes
+    → Persist to SQLite + VectorStore
 ```
 
-Each node represents a symbol (function, class, method, module) with its code, signature, docstring, and git metadata. Edges encode relationships: `CALLS`, `IMPORTS`, `INHERITS`, `USES_TYPE`, `CONTAINS`, `READS_CONFIG`.
+Each node represents a symbol (function, class, method, module) with its code, signature, docstring, and git metadata.
+
+**Cross-file symbol resolution** scans each symbol's AST for identifiers and matches them against all known symbols in the graph. This produces real dependency edges:
+
+| Edge type | Meaning |
+|---|---|
+| `CONTAINS` | Parent–child (file → class → method) |
+| `CALLS` | Symbol references a function or method in another file |
+| `USES_TYPE` | Symbol references a class, struct, protocol, or type |
+| `INHERITS` | Class extends or conforms to another class/protocol |
+| `IMPORTS` | File-level import relationships |
+| `READS_CONFIG` | Symbol reads a configuration key |
 
 ### Retrieval Pipeline
 
 1. **Embed query** — single forward pass through the embedding model
-2. **Hierarchical beam search** — find top-K seed nodes by cosine similarity (containers first, then symbols)
-3. **Subgraph expansion** — BFS from seeds along typed edges, pruning by relevance gate
-4. **Type & config context** — include referenced type definitions and config nodes
-5. **Temporal reranking** — score = 0.5x retrieval + 0.2x recency + 0.15x change frequency + 0.15x co-retrieval
-6. **Budget fitting** — greedily drop lowest-scoring nodes until token count fits budget
-7. **Topological ordering** — order nodes by containment hierarchy for readability
+2. **Hybrid search** — combines cosine similarity over embeddings, BM25 keyword scoring, and exact/fuzzy name and path matching. Results are fused with configurable `hybrid_alpha` weighting.
+3. **Hierarchical beam search** — containers first, then drill into symbols
+4. **Subgraph expansion** — BFS from seeds along typed edges, pruning by relevance gate
+5. **Type & config context** — include referenced type definitions and config nodes
+6. **Temporal reranking** — score = 0.5× retrieval + 0.2× recency + 0.15× change frequency + 0.15× co-retrieval
+7. **Budget fitting** — greedily drop lowest-scoring nodes until token count fits budget
+8. **Topological ordering** — order nodes by containment hierarchy for readability
 
 ### Session Deduplication
 
@@ -211,10 +232,37 @@ Mimir stores the last-indexed commit hash per repo. On each run:
 1. Computes `git diff` against the stored commit
 2. Removes stale nodes (deleted/modified files)
 3. Re-parses only changed/added files
-4. Embeds only new nodes
-5. Persists only the delta
+4. Resolves cross-file references for affected symbols
+5. Embeds only new nodes
+6. Persists only the delta
 
 Unchanged repos are skipped entirely.
+
+### Live File Watching
+
+For an always-fresh graph during development, Mimir can watch your repos for file changes and re-index automatically:
+
+```bash
+mimir serve --watch            # start MCP server with live re-indexing
+```
+
+Or enable it permanently in `mimir.toml`:
+
+```toml
+[watcher]
+enabled = true
+```
+
+The file watcher uses a debounced approach — rapid saves (e.g., auto-format on save) are batched into a single re-index operation. Every file save triggers:
+
+1. Tree-sitter re-parse of the changed file
+2. Stale node removal + new node creation
+3. Affected-set cross-file resolution (only the changed symbols, not the full graph)
+4. Heuristic summary generation
+5. Embedding + vector store update
+6. BM25 index invalidation
+
+The graph, vector store, and search index stay in sync with your code as you edit.
 
 ---
 
@@ -238,6 +286,19 @@ Add to your IDE's MCP config (`~/.cursor/mcp.json` or `claude_desktop_config.jso
     "mimir": {
       "command": "mimir",
       "args": ["serve", "--config", "/path/to/your-project/mimir.toml"]
+    }
+  }
+}
+```
+
+With live re-indexing:
+
+```json
+{
+  "mcpServers": {
+    "mimir": {
+      "command": "mimir",
+      "args": ["serve", "--watch", "--config", "/path/to/your-project/mimir.toml"]
     }
   }
 }
@@ -562,7 +623,7 @@ Mimir stores all index data in a local directory (default `.mimir/`, configurabl
 
 ## Supported Languages
 
-Mimir uses tree-sitter grammars for symbol extraction. Currently supported:
+Mimir uses tree-sitter grammars for language-agnostic symbol extraction and cross-file resolution. Currently supported:
 
 Python, TypeScript, JavaScript, Go, Java, Rust, C, C++, Ruby, Swift, Kotlin, C#, TOML, YAML, JSON
 
@@ -587,7 +648,7 @@ mimir workspace             Manage named workspaces
 
 Index flags:
   --clean                   Force a full re-index (wipes existing data)
-  --mode MODE               Summary mode: none, heuristic, llm
+  --mode MODE               Summary mode: none, heuristic
 
 Serve modes:
   (default)                 stdio MCP server (local IDE integration)
@@ -595,6 +656,7 @@ Serve modes:
   --http-port PORT          HTTP port (default: 8421)
   --http-host HOST          HTTP bind address (default: 0.0.0.0)
   --remote / -r URL         Proxy to a remote Mimir HTTP server
+  --watch                   Enable live file watching (re-indexes on save)
 
 Global flags:
   --workspace / -w NAME     Use a named workspace from the registry
@@ -622,7 +684,7 @@ The client package has only 2 dependencies (`aiohttp`, `typer`) and does not req
 ├── mimir/                      # Server package (mimir-context-server)
 │   ├── domain/                 # Core models, config, graph, errors
 │   ├── ports/                  # Interface definitions (embedder, parser, stores)
-│   ├── services/               # Business logic (indexing, retrieval, temporal, session)
+│   ├── services/               # Business logic (indexing, retrieval, temporal, session, watcher)
 │   ├── infra/                  # Implementations (tree-sitter, embedders, SQLite, ChromaDB)
 │   ├── adapters/               # External interfaces (CLI, MCP, HTTP, web UI)
 │   └── container.py            # Dependency injection wiring

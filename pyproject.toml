@@ -41,6 +41,7 @@ dependencies = [
     "tiktoken>=0.9",
     "rank-bm25>=0.2",
     "rich>=14.0",
+    "watchdog>=6.0",
 ]
 
 [project.optional-dependencies]

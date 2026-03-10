@@ -60,11 +60,10 @@ class RetrievalService:
         repos
             Optional repo filter.
         flat
-            Force flat search even if summaries exist.
+            Force flat vector search instead of hierarchical beam search.
         """
         budget = token_budget or self._config.retrieval.default_token_budget
         width = beam_width or self._config.retrieval.default_beam_width
-        mode = self._config.indexing.summary_mode
 
         # Step 1: Embed the query
         embeddings = await self._embedder.embed_batch([query])
@@ -72,7 +71,7 @@ class RetrievalService:
 
         # Step 2: Find seed nodes
         where_filter = {"repo": repos[0]} if repos and len(repos) == 1 else None
-        if mode == "none" or flat:
+        if flat:
             seeds = self._flat_search(query_embedding, graph, where=where_filter)
         else:
             seeds = self._hierarchical_beam_search(
@@ -157,6 +156,11 @@ class RetrievalService:
 
     _bm25_index = None
     _bm25_node_ids: list[str] = []
+
+    def invalidate_bm25(self) -> None:
+        """Reset the cached BM25 index, forcing rebuild on next search."""
+        self._bm25_index = None
+        self._bm25_node_ids = []
 
     def _ensure_bm25(self, graph: CodeGraph) -> None:
         """Build a BM25 index over all graph nodes (lazy, once per session)."""

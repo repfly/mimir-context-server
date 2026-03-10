@@ -20,6 +20,7 @@ class Container:
     def __init__(self, config: MimirConfig) -> None:
         self.config = config
         self._graph = None  # lazy loaded
+        self._watcher = None  # lazy, created on demand
 
         # Infrastructure ------------------------------------------------
 
@@ -41,7 +42,7 @@ class Container:
         from mimir.infra.stores.sqlite_session import SqliteSessionStore
         self.session_store = SqliteSessionStore(config.data_dir / "sessions.db")
 
-        # LLM client (used for summarisation and semantic search / ask)
+        # LLM client (used by the `ask` CLI command for interactive Q&A)
         self.llm_client = self._build_llm_client()
 
         # Services ------------------------------------------------------
@@ -53,7 +54,6 @@ class Container:
             embedder=self.embedder,
             vector_store=self.vector_store,
             graph_store=self.graph_store,
-            llm_client=self.llm_client,
         )
 
         from mimir.services.retrieval import RetrievalService
@@ -190,6 +190,21 @@ class Container:
         logger.info("Data cleared: %s", cleared)
         return {"cleared": cleared}
 
+    @property
+    def watcher(self):
+        """Lazy-create the file watcher service."""
+        if self._watcher is None:
+            from mimir.services.watcher import FileWatcherService
+            self._watcher = FileWatcherService(
+                config=self.config,
+                indexing_service=self.indexing,
+                graph=self.load_graph(),
+                graph_store=self.graph_store,
+                vector_store=self.vector_store,
+                retrieval_service=self.retrieval,
+            )
+        return self._watcher
+
     def warmup(self) -> None:
         """Eagerly load the embedding model so the first query is fast."""
         if hasattr(self.embedder, '_ensure_model'):
@@ -199,5 +214,7 @@ class Container:
 
     def close(self) -> None:
         """Release all resources."""
+        if self._watcher is not None:
+            self._watcher.stop()
         self.graph_store.close()
         self.session_store.close()

@@ -14,12 +14,11 @@ from pathlib import Path
 from typing import Optional
 
 from mimir.domain.config import MimirConfig
-from mimir.domain.errors import IndexingError, ParsingError
+from mimir.domain.errors import ParsingError
 from mimir.domain.graph import CodeGraph
 from mimir.domain.models import Edge, EdgeKind, Node, NodeKind
 from mimir.ports.embedder import Embedder
 from mimir.ports.graph_store import GraphStore
-from mimir.ports.llm_client import LlmClient
 from mimir.domain.lang import detect_language
 from mimir.ports.parser import Parser, Symbol
 from mimir.ports.vector_store import VectorStore
@@ -37,14 +36,12 @@ class IndexingService:
         embedder: Embedder,
         vector_store: VectorStore,
         graph_store: GraphStore,
-        llm_client: Optional[LlmClient] = None,
     ) -> None:
         self._config = config
         self._parser = parser
         self._embedder = embedder
         self._vector_store = vector_store
         self._graph_store = graph_store
-        self._llm_client = llm_client
 
     async def index_all(self, *, mode_override: Optional[str] = None) -> CodeGraph:
         """Run the full indexing pipeline.
@@ -77,13 +74,9 @@ class IndexingService:
 
         logger.info("Graph built: %s", graph.stats())
 
-        # Phase 4: Summarization (mode-dependent)
+        # Phase 4: Summarization
         if mode == "heuristic":
             self._generate_heuristic_summaries(graph)
-        elif mode == "llm":
-            if self._llm_client is None:
-                raise IndexingError("LLM client required for llm mode but not configured")
-            await self._generate_llm_summaries(graph)
 
         # Phase 5: Embedding
         await self._embed_graph(graph, mode)
@@ -389,8 +382,6 @@ class IndexingService:
         if mode == "heuristic":
             for node in all_new_nodes:
                 node.summary = self._heuristic_summary(node, graph)
-        elif mode == "llm" and self._llm_client is not None:
-            await self._generate_llm_summaries_for_nodes(graph, all_new_nodes)
 
         # Phase 7: Embed new/changed nodes only
         if all_new_nodes:
@@ -627,6 +618,230 @@ class IndexingService:
             "Repo %s: %d files, %d symbols",
             repo_name, files_indexed, symbols_indexed,
         )
+
+    async def index_files(
+        self,
+        graph: CodeGraph,
+        repo_name: str,
+        repo_path: Path,
+        changed_files: set[str],
+        deleted_files: set[str],
+        language_hint: Optional[str] = None,
+    ) -> tuple[list[str], list[Node], list[Edge]]:
+        """Re-index specific files within a loaded graph (used by file watcher).
+
+        This is a lightweight alternative to ``index_incremental`` that
+        operates on individual files without git diff.  It never calls
+        the LLM — only heuristic summaries are used.
+
+        Returns ``(removed_ids, new_nodes, new_edges)``.
+        """
+        removed_ids: list[str] = []
+        new_nodes: list[Node] = []
+        new_edges: list[Edge] = []
+
+        # 1. Remove stale nodes for deleted + changed files
+        files_to_remove = deleted_files | changed_files
+        if files_to_remove:
+            removed_ids = graph.remove_nodes_by_paths(repo_name, files_to_remove)
+
+        # 2. Re-parse changed files
+        for rel_path in sorted(changed_files):
+            file_path = str(repo_path / rel_path)
+
+            if self._is_excluded(os.path.basename(rel_path)):
+                continue
+            if not os.path.isfile(file_path):
+                continue
+
+            try:
+                size_kb = os.path.getsize(file_path) / 1024
+                if size_kb > self._config.indexing.max_file_size_kb:
+                    continue
+            except OSError:
+                continue
+
+            try:
+                symbols = await self._parser.parse_file(file_path, language_hint)
+            except Exception as exc:
+                logger.warning("Watcher parse failed for %s: %s", rel_path, exc)
+                continue
+
+            if not symbols:
+                continue
+
+            # Create file node
+            file_id = f"{repo_name}:{rel_path}"
+            file_node = Node(
+                id=file_id,
+                repo=repo_name,
+                kind=NodeKind.FILE,
+                name=os.path.basename(rel_path),
+                path=rel_path,
+            )
+            graph.add_node(file_node)
+            new_nodes.append(file_node)
+
+            # Link file to parent module/repo
+            rel_dir = os.path.dirname(rel_path)
+            parent_id = f"{repo_name}:{rel_dir}/" if rel_dir else f"{repo_name}:"
+            if graph.has_node(parent_id):
+                edge = Edge(source=parent_id, target=file_id, kind=EdgeKind.CONTAINS)
+                graph.add_edge(edge)
+                new_edges.append(edge)
+
+            # Add symbol nodes
+            for sym in symbols:
+                base_id = f"{repo_name}:{rel_path}::{sym.name}"
+                sym_id = base_id
+                suffix = 2
+                while graph.has_node(sym_id):
+                    sym_id = f"{base_id}_{suffix}"
+                    suffix += 1
+
+                node_kind = self._map_symbol_kind(sym.kind)
+                sym_node = Node(
+                    id=sym_id,
+                    repo=repo_name,
+                    kind=node_kind,
+                    name=sym.name,
+                    path=rel_path,
+                    start_line=sym.start_line,
+                    end_line=sym.end_line,
+                    raw_code=sym.code,
+                    signature=sym.signature,
+                    docstring=sym.docstring,
+                )
+                self._populate_git_metadata(sym_node, repo_path)
+                graph.add_node(sym_node)
+                new_nodes.append(sym_node)
+
+                # CONTAINS edge
+                edge = Edge(source=file_id, target=sym_id, kind=EdgeKind.CONTAINS)
+                graph.add_edge(edge)
+                new_edges.append(edge)
+
+        # 3. Affected-set cross-file resolution (only for new symbols)
+        new_symbol_nodes = [n for n in new_nodes if n.is_symbol]
+        if new_symbol_nodes and hasattr(self._parser, 'extract_identifiers'):
+            xref_edges = self._resolve_affected_refs(graph, new_symbol_nodes)
+            new_edges.extend(xref_edges)
+
+        # 4. Heuristic summaries (never LLM)
+        for node in new_nodes:
+            node.summary = self._heuristic_summary(node, graph)
+
+        # 5. Embed new nodes
+        if new_nodes:
+            await self._embed_nodes(new_nodes, "heuristic", graph)
+
+        logger.info(
+            "index_files: -%d removed, +%d nodes, +%d edges",
+            len(removed_ids), len(new_nodes), len(new_edges),
+        )
+        return removed_ids, new_nodes, new_edges
+
+    def _resolve_affected_refs(
+        self, graph: CodeGraph, new_symbols: list[Node],
+    ) -> list[Edge]:
+        """Cross-file resolution for only the affected symbols.
+
+        Scans new symbols' code for references to existing symbols,
+        and scans existing symbols' code for references to new symbol names.
+        Much faster than full ``_resolve_cross_file_refs`` for single-file changes.
+        """
+        from mimir.domain.lang import detect_language
+
+        # Build full name → [node] index
+        name_index: dict[str, list[Node]] = {}
+        for node in graph.all_nodes():
+            if node.is_symbol:
+                name_index.setdefault(node.name, []).append(node)
+
+        ambiguous_names = {
+            name for name, nodes in name_index.items()
+            if len(nodes) > 20
+        }
+
+        new_edges: list[Edge] = []
+        seen_edges: set[tuple[str, str, str]] = set()
+
+        # Collect existing non-CONTAINS edges to avoid duplicates
+        for edge in graph.all_edges():
+            if edge.kind != EdgeKind.CONTAINS:
+                seen_edges.add((edge.source, edge.target, edge.kind.value))
+
+        new_symbol_ids = {n.id for n in new_symbols}
+        new_symbol_names = {n.name for n in new_symbols}
+
+        def _try_add_edge(source_id: str, target: Node, ident: str, inherits_names: set[str]) -> None:
+            if target.id == source_id:
+                return
+            if ident in inherits_names:
+                edge_kind = EdgeKind.INHERITS
+            elif target.kind in (NodeKind.CLASS, NodeKind.TYPE):
+                edge_kind = EdgeKind.USES_TYPE
+            else:
+                edge_kind = EdgeKind.CALLS
+
+            edge_key = (source_id, target.id, edge_kind.value)
+            if edge_key in seen_edges:
+                return
+            seen_edges.add(edge_key)
+
+            edge = Edge(source=source_id, target=target.id, kind=edge_kind)
+            graph.add_edge(edge)
+            new_edges.append(edge)
+
+        # A. Scan new symbols → find what they reference
+        for node in new_symbols:
+            if not node.raw_code:
+                continue
+            lang = detect_language(node.path) if node.path else None
+            identifiers = self._parser.extract_identifiers(
+                node.raw_code, language=lang, file_path=node.path,
+            )
+            inherits_names = self._detect_inheritance(node)
+
+            for ident in identifiers:
+                if ident == node.name or ident in ambiguous_names:
+                    continue
+                targets = name_index.get(ident)
+                if not targets:
+                    continue
+                for target in targets:
+                    _try_add_edge(node.id, target, ident, inherits_names)
+
+        # B. Scan existing symbols → find references TO new symbol names
+        for node in graph.all_nodes():
+            if not node.is_symbol or not node.raw_code:
+                continue
+            if node.id in new_symbol_ids:
+                continue  # already handled above
+
+            # Quick pre-filter: does raw_code contain any new symbol name?
+            if not any(name in node.raw_code for name in new_symbol_names if name not in ambiguous_names):
+                continue
+
+            lang = detect_language(node.path) if node.path else None
+            identifiers = self._parser.extract_identifiers(
+                node.raw_code, language=lang, file_path=node.path,
+            )
+            inherits_names = self._detect_inheritance(node)
+
+            for ident in identifiers:
+                if ident not in new_symbol_names or ident in ambiguous_names:
+                    continue
+                targets = name_index.get(ident)
+                if not targets:
+                    continue
+                for target in targets:
+                    if target.id not in new_symbol_ids:
+                        continue  # only add edges TO new symbols
+                    _try_add_edge(node.id, target, ident, inherits_names)
+
+        logger.info("Affected cross-file resolution: %d new edges", len(new_edges))
+        return new_edges
 
     def _is_excluded(self, name: str) -> bool:
         """Check if a file/dir name matches any exclusion pattern."""
@@ -970,84 +1185,6 @@ class IndexingService:
 
         return "\n".join(parts) if parts else node.name
 
-    async def _generate_llm_summaries(self, graph: CodeGraph) -> None:
-        """Full LLM summarization (llm mode)."""
-        assert self._llm_client is not None
-        import asyncio
-        from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
-
-        # Bottom-up: summarize symbols first, then files, modules, repos
-        levels = [
-            ("Symbols", [n for n in graph.all_nodes() if n.is_symbol and n.raw_code]),
-            ("Files", list(graph.nodes_by_kind(NodeKind.FILE))),
-            ("Modules", list(graph.nodes_by_kind(NodeKind.MODULE))),
-            ("Repos", list(graph.nodes_by_kind(NodeKind.REPOSITORY))),
-        ]
-
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            TextColumn("{task.completed}/{task.total}"),
-            transient=True,
-        ) as progress:
-            for level_name, level_nodes in levels:
-                if not level_nodes:
-                    continue
-
-                prompts: list[str] = []
-                target_nodes: list[Node] = []
-
-                for node in level_nodes:
-                    prompt = self._build_summary_prompt(node, graph)
-                    prompts.append(prompt)
-                    target_nodes.append(node)
-
-                task_id = progress.add_task(f"[cyan]Summarizing {level_name}...", total=len(prompts))
-
-                async def _summarize(node, prompt):
-                    try:
-                        res = await self._llm_client.complete(prompt)
-                        if res:
-                            node.summary = res
-                    except Exception as exc:
-                        logger.error("LLM call failed: %s", exc)
-                    progress.update(task_id, advance=1)
-
-                tasks = [_summarize(n, p) for n, p in zip(target_nodes, prompts)]
-                await asyncio.gather(*tasks)
-
-    @staticmethod
-    def _build_summary_prompt(node: Node, graph: CodeGraph) -> str:
-        """Build a prompt for LLM summarization."""
-        lang = detect_language(node.path) or "unknown"
-        location = f"{node.repo}/{node.path}" if node.path else node.repo
-
-        parts = [
-            f"Summarize this {node.kind.value} from `{location}` ({lang}) in 2-3 sentences. "
-            "Be specific about what the code does based on its actual content. "
-            "Do not speculate about frameworks or technologies not evident in the code.",
-            "",
-        ]
-        if node.raw_code:
-            parts.append(f"```{lang}\n{node.raw_code[:2000]}\n```")
-        elif node.is_container:
-            children = graph.get_children(node.id)
-            children_info = ", ".join(c.name for c in children[:20])
-            parts.append(f"Contains: {children_info}")
-
-        # Add dependency context
-        callees = graph.get_callees(node.id)
-        if callees:
-            callee_info = ", ".join(
-                f"{c.name} ({c.summary[:50] if c.summary else 'no summary'})"
-                for c in callees[:5]
-            )
-            parts.append(f"\nCalls: {callee_info}")
-
-        return "\n".join(parts)
-
     # ------------------------------------------------------------------
     # Embedding
     # ------------------------------------------------------------------
@@ -1057,10 +1194,8 @@ class IndexingService:
         """Build grounded text for embedding a node.
 
         Symbols use their raw code.  Containers use a concatenation of
-        their path, children's signatures/names, and (if available) a
-        short LLM summary — so the embedding is always anchored in real
-        identifiers and never dominated by a potentially hallucinated
-        summary.
+        their path, children's signatures/names, and (if available)
+        a heuristic summary as a minority signal.
         """
         if node.is_symbol:
             return node.raw_code or node.signature or node.name
@@ -1200,23 +1335,3 @@ class IndexingService:
         )
         logger.info("Embedded and stored %d changed vectors", len(ids))
 
-    async def _generate_llm_summaries_for_nodes(
-        self, graph: CodeGraph, nodes_to_summarise: list[Node],
-    ) -> None:
-        """LLM-summarise only the given nodes (incremental mode)."""
-        assert self._llm_client is not None
-        import asyncio
-
-        prompts = [self._build_summary_prompt(n, graph) for n in nodes_to_summarise]
-
-        async def _summarize(node, prompt):
-            try:
-                res = await self._llm_client.complete(prompt)
-                if res:
-                    node.summary = res
-            except Exception as exc:
-                logger.error("LLM call failed for %s: %s", node.id, exc)
-
-        tasks = [_summarize(n, p) for n, p in zip(nodes_to_summarise, prompts)]
-        await asyncio.gather(*tasks)
-        logger.info("LLM-summarised %d nodes", len(nodes_to_summarise))

@@ -34,6 +34,9 @@ def run_mcp_server(config: MimirConfig, workspace_name: str | None = None) -> No
         _ws_label, graph.node_count,
     )
 
+    # File watcher (started later, after the event loop is available)
+    _watcher_enabled = config.watcher.enabled
+
     async def handle_request(request: dict) -> dict:
         """Route MCP JSON-RPC requests."""
         nonlocal graph  # clear_data may reload the graph; declare nonlocal to avoid UnboundLocalError
@@ -252,6 +255,13 @@ def run_mcp_server(config: MimirConfig, workspace_name: str | None = None) -> No
         await asyncio.get_event_loop().connect_read_pipe(lambda: protocol, sys.stdin)
 
         loop = asyncio.get_event_loop()
+
+        # Start file watcher if enabled
+        if _watcher_enabled:
+            try:
+                container.watcher.start(loop)
+            except Exception as exc:
+                logger.error("Failed to start file watcher: %s", exc)
         write_transport, _ = await loop.connect_write_pipe(
             asyncio.streams.FlowControlMixin, sys.stdout
         )

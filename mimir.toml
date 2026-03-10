@@ -11,7 +11,7 @@ path = "./example-click"
 language_hint = "python"
 
 [indexing]
-summary_mode = "llm"
+summary_mode = "heuristic"
 concurrency = 4
 excluded_patterns = ["__pycache__", ".git", "*.pyc", "node_modules", "venv", ".venv", "*.egg-info", "dist", "build"]
 max_file_size_kb = 500

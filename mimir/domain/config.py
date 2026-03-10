@@ -42,7 +42,7 @@ class CrossRepoConfig:
 
 @dataclass(frozen=True)
 class IndexingConfig:
-    summary_mode: Literal["none", "heuristic", "llm"] = "heuristic"
+    summary_mode: Literal["none", "heuristic"] = "heuristic"
     excluded_patterns: list[str] = field(default_factory=lambda: [
         "*.test.*", "*.spec.*", "__pycache__", "node_modules", ".git", "venv",
         ".venv", "dist", "build", ".tox", ".mypy_cache", ".pytest_cache",
@@ -51,7 +51,7 @@ class IndexingConfig:
     concurrency: int = 10
 
     def __post_init__(self) -> None:
-        if self.summary_mode not in ("none", "heuristic", "llm"):
+        if self.summary_mode not in ("none", "heuristic"):
             raise ConfigError(f"Invalid summary_mode: {self.summary_mode!r}")
         if self.max_file_size_kb <= 0:
             raise ConfigError("max_file_size_kb must be positive")
@@ -114,6 +114,21 @@ class SessionConfig:
     topic_tracking_alpha: float = 0.3
 
 
+@dataclass(frozen=True)
+class WatcherConfig:
+    """File watcher configuration for live re-indexing."""
+
+    enabled: bool = False
+    debounce_ms: int = 1000       # ms to wait after last file event
+    batch_window_ms: int = 2000   # max ms to accumulate changes before flush
+
+    def __post_init__(self) -> None:
+        if self.debounce_ms < 0:
+            raise ConfigError("debounce_ms must be non-negative")
+        if self.batch_window_ms < self.debounce_ms:
+            raise ConfigError("batch_window_ms must be >= debounce_ms")
+
+
 # ---------------------------------------------------------------------------
 # Root config
 # ---------------------------------------------------------------------------
@@ -133,6 +148,7 @@ class MimirConfig:
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     temporal: TemporalConfig = field(default_factory=TemporalConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
+    watcher: WatcherConfig = field(default_factory=WatcherConfig)
 
     def __post_init__(self) -> None:
         if not self.repos:
@@ -190,6 +206,7 @@ class MimirConfig:
                 retrieval=_parse_section(RetrievalConfig, raw.get("retrieval", {})),
                 temporal=_parse_section(TemporalConfig, raw.get("temporal", {})),
                 session=_parse_section(SessionConfig, raw.get("session", {})),
+                watcher=_parse_section(WatcherConfig, raw.get("watcher", {})),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ConfigError(f"Invalid config: {exc}") from exc

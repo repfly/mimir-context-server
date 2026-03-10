@@ -85,6 +85,12 @@ def _load_config(
         raise typer.Exit(1) from exc
 
 
+def _enable_watcher(watcher_config):
+    """Return a copy of WatcherConfig with enabled=True."""
+    from dataclasses import replace
+    return replace(watcher_config, enabled=True)
+
+
 def _setup_logging(verbose: bool) -> None:
     from rich.logging import RichHandler
     level = logging.DEBUG if verbose else logging.INFO
@@ -247,7 +253,7 @@ def _kill_serve_processes() -> int:
 
 @app.command()
 def index(
-    mode: Optional[str] = typer.Option(None, help="Summary mode: none, heuristic, llm"),
+    mode: Optional[str] = typer.Option(None, help="Summary mode: none, heuristic"),
     clean: bool = typer.Option(False, "--clean", help="Force a full re-index (wipes existing data)"),
     workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Named workspace from registry"),
     config: Path = typer.Option(_DEFAULT_CONFIG, "--config", "-c", help="Config file path"),
@@ -255,6 +261,13 @@ def index(
 ) -> None:
     """Index all configured repositories. Uses incremental indexing by default."""
     _setup_logging(verbose)
+
+    if mode == "llm":
+        console.print(
+            "[red bold]Error:[/] summary_mode 'llm' has been removed. "
+            "Use 'heuristic' (default) or 'none'."
+        )
+        raise typer.Exit(1)
 
     # Stop any running `mimir serve` instances to release database locks.
     killed = _kill_serve_processes()
@@ -514,6 +527,7 @@ def serve(
     http_port: int = typer.Option(8421, "--http-port", help="Port for the HTTP server (only with --http)"),
     http_host: str = typer.Option("0.0.0.0", "--http-host", help="Host to bind the HTTP server to"),
     remote: Optional[str] = typer.Option(None, "--remote", "-r", help="URL of a remote Mimir HTTP server to proxy (e.g. http://team-server:8421)"),
+    watch: bool = typer.Option(False, "--watch", help="Enable file watcher for live re-indexing (heuristic summaries only, no LLM)"),
     workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Named workspace from registry"),
     config: Path = typer.Option(_DEFAULT_CONFIG, "--config", "-c"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
@@ -551,6 +565,8 @@ def serve(
     elif http:
         # Shared HTTP server mode
         cfg, ws_name = _load_config(config, workspace)
+        if watch:
+            cfg.watcher = _enable_watcher(cfg.watcher)
         err_console.print(
             f"[green]Starting shared Mimir HTTP server on http://{http_host}:{http_port}[/]",
         )
@@ -562,6 +578,8 @@ def serve(
     else:
         # Default stdio MCP mode
         cfg, ws_name = _load_config(config, workspace)
+        if watch:
+            cfg.watcher = _enable_watcher(cfg.watcher)
         from mimir.adapters.mcp_server import run_mcp_server
         run_mcp_server(cfg, workspace_name=ws_name)
 
