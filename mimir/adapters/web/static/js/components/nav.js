@@ -2,10 +2,12 @@
 
 const Nav = {
     items: [
-        { id: 'dashboard', label: 'Dashboard', icon: '📊' },
-        { id: 'nodes', label: 'Nodes', icon: '🔗' },
-        { id: 'graph', label: 'Graph', icon: '🕸️' },
-        { id: 'search', label: 'Search', icon: '🔍' },
+        { id: 'dashboard', label: 'Overview' },
+        { id: 'search', label: 'Search' },
+        { id: 'nodes', label: 'Nodes' },
+        { id: 'graph', label: 'Graph' },
+        { id: 'quality', label: 'Quality' },
+        { id: 'hotspots', label: 'Hotspots' },
     ],
 
     render(container) {
@@ -22,7 +24,6 @@ const Nav = {
                 className: `nav-item ${item.id === App.currentView ? 'active' : ''}`,
                 onclick: () => App.navigate(item.id),
             },
-                Utils.el('span', { className: 'icon' }, item.icon),
                 Utils.el('span', {}, item.label),
             );
             container.appendChild(el);

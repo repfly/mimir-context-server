@@ -34,6 +34,8 @@ Mimir indexes your code into a hierarchical graph of repositories, files, classe
 - **Query intent classification** — automatically detects query type (locate, trace, write, debug) and tunes retrieval parameters accordingly
 - **Subgraph expansion** — automatically surfaces callers, callees, type definitions, and config references
 - **Structural embeddings** — symbols are embedded with their docstrings, callers, callees, and type relationships for richer semantic search
+- **Connectivity quality scoring** — nodes are scored by edge density, embedding presence, content completeness, and expected edge coverage; poorly-connected nodes are deprioritized during retrieval
+- **Graph gap detection** — identifies under-indexed or poorly-resolved areas of the codebase with diagnostic reasons per node
 - **Temporal reranking** — recently and frequently changed code scores higher
 - **Session deduplication** — exponential decay model tracks what the LLM remembers, with topic-aware boosting
 - **Write-path context** — shows interfaces, sibling implementations, test files, and DI registrations before you edit a file
@@ -205,9 +207,10 @@ Each node represents a symbol (function, class, method, module) with its code, s
 4. **Hierarchical beam search** — containers first, then drill into symbols
 5. **Subgraph expansion** — BFS from seeds along typed edges, pruning by relevance gate. Expansion depth adapts per intent (1 hop for locate, 3 for trace).
 6. **Type & config context** — include referenced type definitions and config nodes
-7. **Temporal reranking** — score = 0.5× retrieval + 0.2× recency + 0.15× change frequency + 0.15× co-retrieval
-8. **Budget fitting** — greedily drop lowest-scoring nodes until token count fits budget
-9. **Topological ordering** — order nodes by containment hierarchy for readability
+7. **Quality adjustment** — blend connectivity quality into node scores (85% retrieval + 15% quality), deprioritizing isolated or incomplete nodes
+8. **Temporal reranking** — score = 0.45× retrieval + 0.18× recency + 0.12× change frequency + 0.12× co-retrieval + 0.13× quality
+9. **Budget fitting** — greedily drop lowest-scoring nodes until token count fits budget
+10. **Topological ordering** — order nodes by containment hierarchy for readability
 
 ### Session Deduplication
 
@@ -268,6 +271,37 @@ The file watcher uses a debounced approach — rapid saves (e.g., auto-format on
 
 The graph, vector store, and search index stay in sync with your code as you edit.
 
+### Quality Scoring & Gap Detection
+
+Every node in the graph carries a **connectivity quality score** in [0, 1], computed from four weighted factors:
+
+| Factor | What it measures |
+|---|---|
+| **Edge density** | Number of meaningful dependency edges (CALLS, USES_TYPE, etc.) relative to node kind |
+| **Embedding presence** | Whether the node has a vector embedding for semantic search |
+| **Content completeness** | Whether the node has source code, summary, or docstring |
+| **Expected edge coverage** | Fraction of expected edge kinds present (e.g., files should have CONTAINS + IMPORTS) |
+
+Weights are tuned per node kind — edge density matters most for symbols, while structure and content matter more for files.
+
+During retrieval, the quality score is blended into node ranking so that well-connected, fully-resolved nodes are preferred over isolated or incomplete ones. This reduces the chance of surfacing "dead" nodes that lack dependency context.
+
+**Gap detection** scans the graph for nodes below a quality threshold (default 0.3) and diagnoses *why* each node scores poorly:
+
+```bash
+mimir quality                        # show overview + worst gaps
+mimir quality --threshold 0.5        # stricter threshold
+mimir quality --repos my-api         # scope to one repo
+```
+
+Typical gap reasons include:
+- **Isolated symbol** — a function or class with no dependency edges (not called by or calling anything)
+- **Missing embedding** — node was not embedded, invisible to semantic search
+- **No code or summary** — empty content, nothing to show in context bundles
+- **Missing expected edges** — e.g., a file node with no CONTAINS edges (no symbols extracted)
+
+Gap detection is useful after indexing to verify coverage, or periodically to catch regressions as the codebase evolves.
+
 ---
 
 ## Serving Modes
@@ -315,6 +349,7 @@ With live re-indexing:
 | `get_context` | Retrieve relevant source code for a natural language query. Call before answering any codebase question. |
 | `get_write_context` | Get everything you need before editing a file: interfaces, sibling implementations, test file, DI registrations, and import graph. |
 | `get_impact` | Analyze what would break if you change a symbol or file: callers, type users, implementors, test files, and transitive dependencies. |
+| `get_quality` | Analyze graph connectivity quality and detect gaps — nodes with missing or weak connections that may indicate under-indexed areas. |
 | `get_graph_stats` | Node/edge counts, breakdown by kind and repo |
 | `get_hotspots` | Recently and frequently modified code |
 | `clear_data` | Wipe the index |
@@ -420,6 +455,7 @@ The shared server exposes a REST API for non-MCP clients (dashboards, CI pipelin
 | `/api/v1/impact` | POST | Impact analysis — `{"symbol_name": "AuthService", "max_hops": 3}` |
 | `/api/v1/stats` | GET | Graph statistics breakdown by kind and repo |
 | `/api/v1/hotspots` | GET | Recently/frequently changed code. Optional `?top=20` |
+| `/api/v1/quality` | GET | Graph quality overview and gap detection. Optional `?threshold=0.3&top_n=50&repos=my-api` |
 | `/api/v1/clear` | POST | Clear index data — `{"graph": true, "sessions": true}` |
 | `/api/v1/mcp` | POST | Raw MCP JSON-RPC passthrough (used by `--remote` proxy) |
 
@@ -649,6 +685,7 @@ mimir ask "query"           Interactive search (retrieves context, calls LLM)
 mimir serve                 Start the MCP server
 mimir ui                    Launch the web inspector (localhost:8420)
 mimir hotspots              Show recently/frequently changed code
+mimir quality               Analyze graph quality and detect gaps
 mimir graph                 Explore the code graph
 mimir clear                 Delete locally stored index data
 mimir vacuum                Compact the SQLite database
@@ -692,7 +729,7 @@ The client package has only 2 dependencies (`aiohttp`, `typer`) and does not req
 ├── mimir/                      # Server package (mimir-context-server)
 │   ├── domain/                 # Core models, config, graph, errors
 │   ├── ports/                  # Interface definitions (embedder, parser, stores)
-│   ├── services/               # Business logic (indexing, retrieval, intent, write_context, impact, temporal, session, watcher)
+│   ├── services/               # Business logic (indexing, retrieval, intent, write_context, impact, temporal, session, quality, watcher)
 │   ├── infra/                  # Implementations (tree-sitter, embedders, SQLite, ChromaDB)
 │   ├── adapters/               # External interfaces (CLI, MCP, HTTP, web UI)
 │   └── container.py            # Dependency injection wiring

@@ -10,7 +10,7 @@ import logging
 import math
 import re
 from collections import defaultdict
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from mimir.domain.config import MimirConfig
 from mimir.domain.graph import CodeGraph
@@ -19,6 +19,9 @@ from mimir.domain.subgraph import ContextBundle, SubGraph
 from mimir.ports.embedder import Embedder
 from mimir.ports.vector_store import VectorStore
 from mimir.services.intent import classify_intent, INTENT_PROFILES
+
+if TYPE_CHECKING:
+    from mimir.services.quality import QualityService
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +38,11 @@ class RetrievalService:
         self._config = config
         self._embedder = embedder
         self._vector_store = vector_store
+        self._quality_service: Optional[QualityService] = None
+
+    def set_quality_service(self, quality_service: QualityService) -> None:
+        """Inject the quality service for connectivity-aware scoring."""
+        self._quality_service = quality_service
 
     async def search(
         self,
@@ -142,6 +150,10 @@ class RetrievalService:
         # Step 4: Add type and config context
         self._add_type_context(subgraph, graph)
         self._add_config_context(subgraph, graph)
+
+        # Step 4b: Apply quality score adjustment
+        if self._quality_service is not None:
+            self._apply_quality_adjustment(subgraph, graph)
 
         # Step 5: Fit to budget
         self._fit_to_budget(subgraph, budget, seed_ids={n.id for n in seed_nodes})
@@ -547,6 +559,21 @@ class RetrievalService:
         leaves.sort(key=key, reverse=True)
 
         return types + configs + others + leaves
+
+    # ------------------------------------------------------------------
+    # Quality adjustment
+    # ------------------------------------------------------------------
+
+    def _apply_quality_adjustment(self, subgraph: SubGraph, graph: CodeGraph) -> None:
+        """Blend connectivity quality into subgraph scores.
+
+        Adjusts each node's score by blending in its quality score:
+            adjusted = 0.85 * original + 0.15 * quality
+        """
+        for node_id, node in subgraph.nodes.items():
+            original = subgraph.scores.get(node_id, 0.5)
+            quality = self._quality_service.compute_quality_score(node, graph)
+            subgraph.scores[node_id] = 0.85 * original + 0.15 * quality
 
     # ------------------------------------------------------------------
     # Utilities

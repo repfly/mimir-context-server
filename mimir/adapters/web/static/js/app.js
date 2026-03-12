@@ -8,6 +8,8 @@ const App = {
         nodes: { container: 'nodes-view', render: () => NodeBrowser.render(document.getElementById('nodes-view')) },
         graph: { container: 'graph-view', render: () => GraphViz.render(document.getElementById('graph-view')) },
         search: { container: 'search-view', render: () => Search.render(document.getElementById('search-view')) },
+        quality: { container: 'quality-view', render: () => Quality.render(document.getElementById('quality-view')) },
+        hotspots: { container: 'hotspots-view', render: () => Hotspots.render(document.getElementById('hotspots-view')) },
     },
 
     navigate(viewId) {

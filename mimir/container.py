@@ -78,6 +78,11 @@ class Container:
             session_store=self.session_store,
         )
 
+        from mimir.services.quality import QualityService
+        self.quality = QualityService()
+        self.temporal.set_quality_service(self.quality)
+        self.retrieval.set_quality_service(self.quality)
+
     def _build_embedder(self):
         model = self.config.embeddings.model
         if model.startswith("api:"):
