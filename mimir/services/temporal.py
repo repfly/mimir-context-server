@@ -5,12 +5,15 @@ from __future__ import annotations
 import logging
 import math
 from datetime import datetime, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from mimir.domain.config import MimirConfig
 from mimir.domain.graph import CodeGraph
 from mimir.domain.models import Node
 from mimir.domain.subgraph import SubGraph
+
+if TYPE_CHECKING:
+    from mimir.services.quality import QualityService
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +25,11 @@ class TemporalService:
         self._lambda = config.temporal.recency_lambda
         self._change_window = config.temporal.change_window_commits
         self._co_retrieval_enabled = config.temporal.co_retrieval_enabled
+        self._quality_service: Optional[QualityService] = None
+
+    def set_quality_service(self, quality_service: QualityService) -> None:
+        """Inject the quality service for connectivity-aware reranking."""
+        self._quality_service = quality_service
 
     def temporal_weight(self, node: Node, now: Optional[datetime] = None) -> float:
         """Exponential decay based on last modification time.
@@ -42,24 +50,44 @@ class TemporalService:
         except (ValueError, TypeError):
             return 0.5
 
-    def apply_temporal_weights(self, subgraph: SubGraph) -> None:
-        """Rerank nodes in a subgraph using temporal signals.
+    def apply_temporal_weights(
+        self, subgraph: SubGraph, graph: Optional[CodeGraph] = None,
+    ) -> None:
+        """Rerank nodes in a subgraph using temporal and quality signals.
 
-        final_score = 0.5*retrieval + 0.2*recency + 0.15*change_freq + 0.15*co_retrieval
+        When a quality service is available and a graph is provided:
+            final = 0.45*retrieval + 0.18*recency + 0.12*change_freq
+                  + 0.12*co_retrieval + 0.13*quality
+
+        Without quality:
+            final = 0.50*retrieval + 0.20*recency + 0.15*change_freq
+                  + 0.15*co_retrieval
         """
         now = datetime.now(timezone.utc)
+        use_quality = self._quality_service is not None and graph is not None
+
         for node_id, node in subgraph.nodes.items():
             retrieval_score = subgraph.scores.get(node_id, 0.5)
             recency = self.temporal_weight(node, now)
             change_freq = self._change_frequency_weight(node)
             co_ret = self._co_retrieval_weight(node, subgraph) if self._co_retrieval_enabled else 0.0
 
-            final = (
-                0.5 * retrieval_score
-                + 0.2 * recency
-                + 0.15 * change_freq
-                + 0.15 * co_ret
-            )
+            if use_quality:
+                quality = self._quality_service.compute_quality_score(node, graph)
+                final = (
+                    0.45 * retrieval_score
+                    + 0.18 * recency
+                    + 0.12 * change_freq
+                    + 0.12 * co_ret
+                    + 0.13 * quality
+                )
+            else:
+                final = (
+                    0.5 * retrieval_score
+                    + 0.2 * recency
+                    + 0.15 * change_freq
+                    + 0.15 * co_ret
+                )
             subgraph.scores[node_id] = final
 
     @staticmethod

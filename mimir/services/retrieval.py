@@ -10,7 +10,8 @@ import logging
 import math
 import re
 from collections import defaultdict
-from typing import Optional
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Optional
 
 from mimir.domain.config import MimirConfig
 from mimir.domain.graph import CodeGraph
@@ -18,6 +19,12 @@ from mimir.domain.models import SYMBOL_KINDS, Edge, EdgeKind, Node, NodeKind, ED
 from mimir.domain.subgraph import ContextBundle, SubGraph
 from mimir.ports.embedder import Embedder
 from mimir.ports.vector_store import VectorStore
+from mimir.services.intent import classify_intent, INTENT_PROFILES
+
+if TYPE_CHECKING:
+    from mimir.services.quality import QualityService
+    from mimir.services.temporal import TemporalService
+    from mimir.infra.stores.sqlite_graph import SqliteGraphStore
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +41,21 @@ class RetrievalService:
         self._config = config
         self._embedder = embedder
         self._vector_store = vector_store
+        self._quality_service: Optional[QualityService] = None
+        self._temporal_service: Optional[TemporalService] = None
+        self._graph_store: Optional[SqliteGraphStore] = None
+
+    def set_quality_service(self, quality_service: QualityService) -> None:
+        """Inject the quality service for connectivity-aware scoring."""
+        self._quality_service = quality_service
+
+    def set_temporal_service(self, temporal_service: TemporalService) -> None:
+        """Inject the temporal service for co-retrieval tracking."""
+        self._temporal_service = temporal_service
+
+    def set_graph_store(self, graph_store: SqliteGraphStore) -> None:
+        """Inject the graph store for persisting retrieval metadata."""
+        self._graph_store = graph_store
 
     async def search(
         self,
@@ -65,6 +87,14 @@ class RetrievalService:
         budget = token_budget or self._config.retrieval.default_token_budget
         width = beam_width or self._config.retrieval.default_beam_width
 
+        # Step 0: Classify query intent and apply parameter overrides
+        intent = classify_intent(query)
+        profile = INTENT_PROFILES[intent]
+        alpha = profile.hybrid_alpha
+        hops = profile.expansion_hops
+        gate = profile.relevance_gate
+        logger.debug("Query intent: %s (alpha=%.2f, hops=%d, gate=%.2f)", intent.value, alpha, hops, gate)
+
         # Step 1: Embed the query
         embeddings = await self._embedder.embed_batch([query])
         query_embedding = embeddings[0]
@@ -89,7 +119,6 @@ class RetrievalService:
             seeds = [s for s in seeds if s[0].repo in repos]
 
         # Step 2b: BM25 keyword search (hybrid)
-        alpha = self._config.retrieval.hybrid_alpha
         bm25_results = self._bm25_search(query, graph, top_k=width * 3, repos=repos)
         if bm25_results:
             seed_ids_so_far = {s[0].id for s in seeds}
@@ -128,19 +157,27 @@ class RetrievalService:
         seed_scores = {s[0].id: s[1] for s in seeds}
         subgraph = self._expand_subgraph(
             seed_nodes, seed_scores, query_embedding, graph,
+            hops=hops, gate=gate,
         )
 
         # Step 4: Add type and config context
         self._add_type_context(subgraph, graph)
         self._add_config_context(subgraph, graph)
 
+        # Step 4b: Apply quality score adjustment
+        if self._quality_service is not None:
+            self._apply_quality_adjustment(subgraph, graph)
+
         # Step 5: Fit to budget
         self._fit_to_budget(subgraph, budget, seed_ids={n.id for n in seed_nodes})
 
-        # Step 6: Topological ordering
+        # Step 6: Update retrieval metadata on retrieved nodes
+        self._update_retrieval_metadata(list(subgraph.nodes.values()))
+
+        # Step 7: Topological ordering
         ordered = self._topological_order(subgraph)
 
-        # Step 7: Build final bundle
+        # Step 8: Build final bundle
         return ContextBundle(
             nodes=ordered,
             edges=subgraph.edges,
@@ -148,6 +185,7 @@ class RetrievalService:
             token_count=sum(n.token_estimate for n in ordered),
             repos_involved=subgraph.repos_involved,
             seed_ids=[n.id for n in seed_nodes],
+            query_embedding=query_embedding,
         )
 
     # ------------------------------------------------------------------
@@ -385,10 +423,13 @@ class RetrievalService:
         seed_scores: dict[str, float],
         query_embedding: list[float],
         graph: CodeGraph,
+        *,
+        hops: Optional[int] = None,
+        gate: Optional[float] = None,
     ) -> SubGraph:
         """BFS expansion from seeds, following dependency edges."""
-        hops = self._config.retrieval.expansion_hops
-        gate = self._config.retrieval.relevance_gate
+        hops = hops if hops is not None else self._config.retrieval.expansion_hops
+        gate = gate if gate is not None else self._config.retrieval.relevance_gate
 
         subgraph = SubGraph()
         for seed in seeds:
@@ -534,6 +575,40 @@ class RetrievalService:
         leaves.sort(key=key, reverse=True)
 
         return types + configs + others + leaves
+
+    # ------------------------------------------------------------------
+    # Retrieval metadata
+    # ------------------------------------------------------------------
+
+    def _update_retrieval_metadata(self, nodes: list[Node]) -> None:
+        """Update retrieval_count, last_retrieved, and co-retrieval on nodes."""
+        now = datetime.now(timezone.utc).isoformat()
+        for node in nodes:
+            node.retrieval_count += 1
+            node.last_retrieved = now
+
+        # Update co-retrieval counts
+        if self._temporal_service is not None:
+            self._temporal_service.update_co_retrieval(nodes)
+
+        # Persist to graph store
+        if self._graph_store is not None:
+            self._graph_store.update_retrieval_metadata(nodes)
+
+    # ------------------------------------------------------------------
+    # Quality adjustment
+    # ------------------------------------------------------------------
+
+    def _apply_quality_adjustment(self, subgraph: SubGraph, graph: CodeGraph) -> None:
+        """Blend connectivity quality into subgraph scores.
+
+        Adjusts each node's score by blending in its quality score:
+            adjusted = 0.85 * original + 0.15 * quality
+        """
+        for node_id, node in subgraph.nodes.items():
+            original = subgraph.scores.get(node_id, 0.5)
+            quality = self._quality_service.compute_quality_score(node, graph)
+            subgraph.scores[node_id] = 0.85 * original + 0.15 * quality
 
     # ------------------------------------------------------------------
     # Utilities

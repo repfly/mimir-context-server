@@ -92,6 +92,7 @@ class ContextBundle:
     repos_involved: list[str]
     session_note: Optional[str] = None
     seed_ids: list[str] = field(default_factory=list)
+    query_embedding: Optional[list[float]] = None
 
     def format_for_llm(self) -> str:
         """Render the context bundle as structured text for an LLM."""

@@ -66,11 +66,24 @@ class Container:
         from mimir.services.temporal import TemporalService
         self.temporal = TemporalService(config=config)
 
+        from mimir.services.write_context import WriteContextService
+        self.write_context = WriteContextService()
+
+        from mimir.services.impact import ImpactService
+        self.impact = ImpactService()
+
         from mimir.services.session import SessionService
         self.session = SessionService(
             config=config,
             session_store=self.session_store,
         )
+
+        from mimir.services.quality import QualityService
+        self.quality = QualityService()
+        self.temporal.set_quality_service(self.quality)
+        self.retrieval.set_quality_service(self.quality)
+        self.retrieval.set_temporal_service(self.temporal)
+        self.retrieval.set_graph_store(self.graph_store)
 
     def _build_embedder(self):
         model = self.config.embeddings.model

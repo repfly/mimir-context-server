@@ -21,6 +21,9 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 """
 
+#: Sessions not updated in this many days are automatically purged.
+_EXPIRY_DAYS = 7
+
 
 class SqliteSessionStore:
     """SQLite persistence for session state."""
@@ -33,13 +36,28 @@ class SqliteSessionStore:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
+            self._purge_expired()
         except sqlite3.Error as exc:
             raise StorageError(f"Failed to init session store: {exc}") from exc
+
+    def _purge_expired(self) -> None:
+        """Remove sessions that haven't been updated within the expiry window."""
+        try:
+            cur = self._conn.execute(
+                "DELETE FROM sessions WHERE updated_at < datetime('now', ?)",
+                (f"-{_EXPIRY_DAYS} days",),
+            )
+            if cur.rowcount > 0:
+                self._conn.commit()
+                logger.info("Purged %d expired sessions (older than %d days)", cur.rowcount, _EXPIRY_DAYS)
+        except sqlite3.Error:
+            pass  # non-critical, best-effort cleanup
 
     def save(self, session: Session) -> None:
         try:
             self._conn.execute(
-                "INSERT OR REPLACE INTO sessions (session_id, data) VALUES (?, ?)",
+                "INSERT OR REPLACE INTO sessions (session_id, data, updated_at) "
+                "VALUES (?, ?, datetime('now'))",
                 (session.session_id, json.dumps(session.to_dict())),
             )
             self._conn.commit()

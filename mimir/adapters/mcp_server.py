@@ -39,7 +39,6 @@ def run_mcp_server(config: MimirConfig, workspace_name: str | None = None) -> No
 
     async def handle_request(request: dict) -> dict:
         """Route MCP JSON-RPC requests."""
-        nonlocal graph  # clear_data may reload the graph; declare nonlocal to avoid UnboundLocalError
         method = request.get("method", "")
         params = request.get("params", {})
         request_id = request.get("id")
@@ -132,24 +131,80 @@ def run_mcp_server(config: MimirConfig, workspace_name: str | None = None) -> No
                             },
                         },
                         {
-                            "name": "clear_data",
+                            "name": "get_write_context",
                             "description": (
-                                "Delete locally stored index data. "
-                                "Call this when the user explicitly asks to clear, reset, or wipe the index, "
-                                "or when the codebase has changed significantly and needs to be re-indexed from scratch. "
-                                "After clearing the graph, the user must run `mimir index` before queries will work again. "
-                                "Clearing sessions only removes conversation history and does not affect the code index."
+                                "Get everything you need to know before editing a file: the symbols it contains, "
+                                "interfaces and base classes those symbols implement or extend, sibling implementations, "
+                                "the associated test file, DI/factory registrations, and import relationships. "
+                                "Call this BEFORE modifying a file so you understand the contracts, tests, and "
+                                "dependents you need to satisfy."
                             ),
                             "inputSchema": {
                                 "type": "object",
                                 "properties": {
-                                    "graph": {
-                                        "type": "boolean",
-                                        "description": "Clear the code graph and all embeddings. Default: true.",
+                                    "file_path": {
+                                        "type": "string",
+                                        "description": "Path to the file you intend to edit, e.g. 'src/auth/login.py' or 'LoginView.swift'. Suffix matching is supported.",
                                     },
-                                    "sessions": {
-                                        "type": "boolean",
-                                        "description": "Clear all conversation sessions. Default: true.",
+                                },
+                                "required": ["file_path"],
+                            },
+                        },
+                        {
+                            "name": "get_impact",
+                            "description": (
+                                "Analyze what would be affected if you change a symbol or file. "
+                                "Returns direct callers, type users, implementors/subclasses, associated test files, "
+                                "and transitive dependencies up to N hops. "
+                                "Call this before refactoring, renaming, or removing code to understand the blast radius."
+                            ),
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "node_id": {
+                                        "type": "string",
+                                        "description": "Node ID from a previous get_context result. Preferred if available.",
+                                    },
+                                    "file_path": {
+                                        "type": "string",
+                                        "description": "File path to narrow down the search. Used with symbol_name.",
+                                    },
+                                    "symbol_name": {
+                                        "type": "string",
+                                        "description": "Name of the function, class, or method to analyze.",
+                                    },
+                                    "max_hops": {
+                                        "type": "integer",
+                                        "description": "Maximum transitive dependency depth. Default: 3.",
+                                    },
+                                },
+                            },
+                        },
+                        {
+                            "name": "get_quality",
+                            "description": (
+                                "Analyze the connectivity quality of the code graph and detect gaps — nodes "
+                                "with missing or weak connections that may indicate under-indexed or poorly-resolved "
+                                "areas of the codebase. Returns a quality overview with average scores, distribution, "
+                                "and a list of the worst-connected nodes with diagnostic reasons. "
+                                "Call this to assess index health, find areas that need re-indexing, or understand "
+                                "which parts of the codebase have incomplete symbol resolution."
+                            ),
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "repos": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": "Optional list of repo names to restrict analysis to.",
+                                    },
+                                    "threshold": {
+                                        "type": "number",
+                                        "description": "Quality score threshold below which nodes are flagged as gaps. Default: 0.3.",
+                                    },
+                                    "top_n": {
+                                        "type": "integer",
+                                        "description": "Maximum number of gap nodes to return. Default: 50.",
                                     },
                                 },
                             },
@@ -174,20 +229,23 @@ def run_mcp_server(config: MimirConfig, workspace_name: str | None = None) -> No
                     if session_id:
                         session = container.session.get_or_create(session_id)
                         sg = _bundle_to_subgraph(bundle)
-                        container.session.session_dedup(sg, session)
-                        
+                        container.session.session_dedup(
+                            sg, session, query_embedding=bundle.query_embedding,
+                        )
+
                         # Apply deduplication back to the bundle
                         bundle.nodes = list(sg.nodes.values())
                         bundle.edges = sg.edges
                         bundle.token_count = sg.token_estimate
                         if sg.notes:
                             bundle.session_note = "Previously seen chunks omitted: " + str(len(sg.notes))
-                            
+
                         container.session.record_retrieval(
                             session,
                             tool_args["query"],
                             bundle.nodes,
                             {n.id: 1.0 for n in bundle.nodes},
+                            query_embedding=bundle.query_embedding,
                         )
 
                     return _response(request_id, {
@@ -221,17 +279,48 @@ def run_mcp_server(config: MimirConfig, workspace_name: str | None = None) -> No
                         }],
                     })
 
-                elif tool_name == "clear_data":
-                    clear_graph = tool_args.get("graph", True)
-                    clear_sessions = tool_args.get("sessions", True)
-                    result = container.clear_data(graph=clear_graph, sessions=clear_sessions)
-                    # Reload graph after clearing so subsequent calls work correctly
-                    if clear_graph:
-                        graph = container.load_graph()
+                elif tool_name == "get_write_context":
+                    wc = container.write_context.assemble(
+                        file_path=tool_args["file_path"],
+                        graph=graph,
+                    )
                     return _response(request_id, {
                         "content": [{
                             "type": "text",
-                            "text": json.dumps(result),
+                            "text": wc.format_for_llm(),
+                        }],
+                    })
+
+                elif tool_name == "get_impact":
+                    result = container.impact.analyze(
+                        graph,
+                        node_id=tool_args.get("node_id"),
+                        file_path=tool_args.get("file_path"),
+                        symbol_name=tool_args.get("symbol_name"),
+                        max_hops=tool_args.get("max_hops", 3),
+                    )
+                    if result is None:
+                        text = "No matching symbol or file found for impact analysis."
+                    else:
+                        text = result.format_for_llm()
+                    return _response(request_id, {
+                        "content": [{
+                            "type": "text",
+                            "text": text,
+                        }],
+                    })
+
+                elif tool_name == "get_quality":
+                    overview = container.quality.detect_gaps(
+                        graph,
+                        repos=tool_args.get("repos"),
+                        threshold=tool_args.get("threshold"),
+                        top_n=tool_args.get("top_n", 50),
+                    )
+                    return _response(request_id, {
+                        "content": [{
+                            "type": "text",
+                            "text": overview.format_for_llm(),
                         }],
                     })
 
