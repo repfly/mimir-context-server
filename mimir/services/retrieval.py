@@ -18,6 +18,7 @@ from mimir.domain.models import SYMBOL_KINDS, Edge, EdgeKind, Node, NodeKind, ED
 from mimir.domain.subgraph import ContextBundle, SubGraph
 from mimir.ports.embedder import Embedder
 from mimir.ports.vector_store import VectorStore
+from mimir.services.intent import classify_intent, INTENT_PROFILES
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,14 @@ class RetrievalService:
         budget = token_budget or self._config.retrieval.default_token_budget
         width = beam_width or self._config.retrieval.default_beam_width
 
+        # Step 0: Classify query intent and apply parameter overrides
+        intent = classify_intent(query)
+        profile = INTENT_PROFILES[intent]
+        alpha = profile.hybrid_alpha
+        hops = profile.expansion_hops
+        gate = profile.relevance_gate
+        logger.debug("Query intent: %s (alpha=%.2f, hops=%d, gate=%.2f)", intent.value, alpha, hops, gate)
+
         # Step 1: Embed the query
         embeddings = await self._embedder.embed_batch([query])
         query_embedding = embeddings[0]
@@ -89,7 +98,6 @@ class RetrievalService:
             seeds = [s for s in seeds if s[0].repo in repos]
 
         # Step 2b: BM25 keyword search (hybrid)
-        alpha = self._config.retrieval.hybrid_alpha
         bm25_results = self._bm25_search(query, graph, top_k=width * 3, repos=repos)
         if bm25_results:
             seed_ids_so_far = {s[0].id for s in seeds}
@@ -128,6 +136,7 @@ class RetrievalService:
         seed_scores = {s[0].id: s[1] for s in seeds}
         subgraph = self._expand_subgraph(
             seed_nodes, seed_scores, query_embedding, graph,
+            hops=hops, gate=gate,
         )
 
         # Step 4: Add type and config context
@@ -148,6 +157,7 @@ class RetrievalService:
             token_count=sum(n.token_estimate for n in ordered),
             repos_involved=subgraph.repos_involved,
             seed_ids=[n.id for n in seed_nodes],
+            query_embedding=query_embedding,
         )
 
     # ------------------------------------------------------------------
@@ -385,10 +395,13 @@ class RetrievalService:
         seed_scores: dict[str, float],
         query_embedding: list[float],
         graph: CodeGraph,
+        *,
+        hops: Optional[int] = None,
+        gate: Optional[float] = None,
     ) -> SubGraph:
         """BFS expansion from seeds, following dependency edges."""
-        hops = self._config.retrieval.expansion_hops
-        gate = self._config.retrieval.relevance_gate
+        hops = hops if hops is not None else self._config.retrieval.expansion_hops
+        gate = gate if gate is not None else self._config.retrieval.relevance_gate
 
         subgraph = SubGraph()
         for seed in seeds:

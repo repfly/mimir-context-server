@@ -15,14 +15,18 @@ class ContextEntry:
     added_at: datetime
     turn_number: int
     relevance_at_addition: float
+    query_embedding_at_addition: Optional[list[float]] = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "node_id": self.node_id,
             "added_at": self.added_at.isoformat(),
             "turn_number": self.turn_number,
             "relevance_at_addition": self.relevance_at_addition,
         }
+        if self.query_embedding_at_addition is not None:
+            d["query_embedding_at_addition"] = self.query_embedding_at_addition
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> ContextEntry:
@@ -31,6 +35,7 @@ class ContextEntry:
             added_at=datetime.fromisoformat(data["added_at"]),
             turn_number=data["turn_number"],
             relevance_at_addition=data["relevance_at_addition"],
+            query_embedding_at_addition=data.get("query_embedding_at_addition"),
         )
 
 
@@ -110,6 +115,7 @@ class Session:
                 added_at=now,
                 turn_number=turn,
                 relevance_at_addition=relevance_scores.get(node_id, 0.0),
+                query_embedding_at_addition=query_embedding,
             )
 
     def to_dict(self) -> dict:

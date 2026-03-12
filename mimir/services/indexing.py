@@ -1193,12 +1193,47 @@ class IndexingService:
     def _embedding_text(node: Node, graph: CodeGraph) -> str:
         """Build grounded text for embedding a node.
 
-        Symbols use their raw code.  Containers use a concatenation of
-        their path, children's signatures/names, and (if available)
-        a heuristic summary as a minority signal.
+        Symbols use their raw code augmented with structural context
+        (docstring, callers, callees, type relationships).
+        Containers use path + children signatures + heuristic summary.
         """
         if node.is_symbol:
-            return node.raw_code or node.signature or node.name
+            code = node.raw_code or node.signature or node.name
+
+            # Augment with structural metadata
+            context_parts: list[str] = []
+            if node.path:
+                context_parts.append(f"File: {node.path}")
+            if node.docstring:
+                context_parts.append(f"Doc: {node.docstring[:200]}")
+
+            callees = graph.get_callees(node.id)
+            if callees:
+                names = [c.name for c in callees[:10]]
+                context_parts.append(f"Calls: {', '.join(names)}")
+
+            callers = graph.get_callers(node.id)
+            if callers:
+                names = [c.name for c in callers[:10]]
+                context_parts.append(f"Called by: {', '.join(names)}")
+
+            for edge_kind, label in [
+                (EdgeKind.INHERITS, "Inherits"),
+                (EdgeKind.IMPLEMENTS, "Implements"),
+            ]:
+                edges = graph.get_outgoing_edges(node.id, edge_kind)
+                if edges:
+                    targets = []
+                    for e in edges[:5]:
+                        t = graph.get_node(e.target)
+                        if t:
+                            targets.append(t.name)
+                    if targets:
+                        context_parts.append(f"{label}: {', '.join(targets)}")
+
+            if context_parts:
+                return code + "\n\n# Context\n" + "\n".join(context_parts)
+            return code
 
         # Container: build from grounded content
         parts: list[str] = []

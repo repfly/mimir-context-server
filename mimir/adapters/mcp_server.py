@@ -132,6 +132,56 @@ def run_mcp_server(config: MimirConfig, workspace_name: str | None = None) -> No
                             },
                         },
                         {
+                            "name": "get_write_context",
+                            "description": (
+                                "Get everything you need to know before editing a file: the symbols it contains, "
+                                "interfaces and base classes those symbols implement or extend, sibling implementations, "
+                                "the associated test file, DI/factory registrations, and import relationships. "
+                                "Call this BEFORE modifying a file so you understand the contracts, tests, and "
+                                "dependents you need to satisfy."
+                            ),
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "file_path": {
+                                        "type": "string",
+                                        "description": "Path to the file you intend to edit, e.g. 'src/auth/login.py' or 'LoginView.swift'. Suffix matching is supported.",
+                                    },
+                                },
+                                "required": ["file_path"],
+                            },
+                        },
+                        {
+                            "name": "get_impact",
+                            "description": (
+                                "Analyze what would be affected if you change a symbol or file. "
+                                "Returns direct callers, type users, implementors/subclasses, associated test files, "
+                                "and transitive dependencies up to N hops. "
+                                "Call this before refactoring, renaming, or removing code to understand the blast radius."
+                            ),
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "node_id": {
+                                        "type": "string",
+                                        "description": "Node ID from a previous get_context result. Preferred if available.",
+                                    },
+                                    "file_path": {
+                                        "type": "string",
+                                        "description": "File path to narrow down the search. Used with symbol_name.",
+                                    },
+                                    "symbol_name": {
+                                        "type": "string",
+                                        "description": "Name of the function, class, or method to analyze.",
+                                    },
+                                    "max_hops": {
+                                        "type": "integer",
+                                        "description": "Maximum transitive dependency depth. Default: 3.",
+                                    },
+                                },
+                            },
+                        },
+                        {
                             "name": "clear_data",
                             "description": (
                                 "Delete locally stored index data. "
@@ -174,20 +224,23 @@ def run_mcp_server(config: MimirConfig, workspace_name: str | None = None) -> No
                     if session_id:
                         session = container.session.get_or_create(session_id)
                         sg = _bundle_to_subgraph(bundle)
-                        container.session.session_dedup(sg, session)
-                        
+                        container.session.session_dedup(
+                            sg, session, query_embedding=bundle.query_embedding,
+                        )
+
                         # Apply deduplication back to the bundle
                         bundle.nodes = list(sg.nodes.values())
                         bundle.edges = sg.edges
                         bundle.token_count = sg.token_estimate
                         if sg.notes:
                             bundle.session_note = "Previously seen chunks omitted: " + str(len(sg.notes))
-                            
+
                         container.session.record_retrieval(
                             session,
                             tool_args["query"],
                             bundle.nodes,
                             {n.id: 1.0 for n in bundle.nodes},
+                            query_embedding=bundle.query_embedding,
                         )
 
                     return _response(request_id, {
@@ -218,6 +271,37 @@ def run_mcp_server(config: MimirConfig, workspace_name: str | None = None) -> No
                         "content": [{
                             "type": "text",
                             "text": json.dumps(hotspots, indent=2),
+                        }],
+                    })
+
+                elif tool_name == "get_write_context":
+                    wc = container.write_context.assemble(
+                        file_path=tool_args["file_path"],
+                        graph=graph,
+                    )
+                    return _response(request_id, {
+                        "content": [{
+                            "type": "text",
+                            "text": wc.format_for_llm(),
+                        }],
+                    })
+
+                elif tool_name == "get_impact":
+                    result = container.impact.analyze(
+                        graph,
+                        node_id=tool_args.get("node_id"),
+                        file_path=tool_args.get("file_path"),
+                        symbol_name=tool_args.get("symbol_name"),
+                        max_hops=tool_args.get("max_hops", 3),
+                    )
+                    if result is None:
+                        text = "No matching symbol or file found for impact analysis."
+                    else:
+                        text = result.format_for_llm()
+                    return _response(request_id, {
+                        "content": [{
+                            "type": "text",
+                            "text": text,
                         }],
                     })
 

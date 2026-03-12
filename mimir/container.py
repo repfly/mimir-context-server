@@ -66,6 +66,12 @@ class Container:
         from mimir.services.temporal import TemporalService
         self.temporal = TemporalService(config=config)
 
+        from mimir.services.write_context import WriteContextService
+        self.write_context = WriteContextService()
+
+        from mimir.services.impact import ImpactService
+        self.impact = ImpactService()
+
         from mimir.services.session import SessionService
         self.session = SessionService(
             config=config,

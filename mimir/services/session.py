@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -42,16 +43,27 @@ class SessionService:
         logger.info("Created new session: %s", new_id)
         return session
 
-    def session_dedup(self, subgraph: SubGraph, session: Session) -> None:
-        """Remove or summarize nodes already in the LLM's context.
+    def session_dedup(
+        self,
+        subgraph: SubGraph,
+        session: Session,
+        query_embedding: Optional[list[float]] = None,
+    ) -> None:
+        """Remove or summarize nodes using continuous exponential decay.
 
-        Rules:
-        - Turn -1 (last turn): skip entirely
-        - Turn -2 to -3: keep summary only, remove code
-        - Turn -5+: re-include fully (LLM has forgotten)
-        - Modified since last provided: always re-include
+        Uses ``context_decay_turns`` as the half-life for an exponential
+        decay model.  Nodes whose topic is still relevant (measured by
+        cosine similarity between current query and the query that added
+        them) decay slower — the LLM is more likely to remember them.
+
+        Decay weight thresholds:
+        - > 0.8  → skip (LLM still remembers)
+        - 0.3–0.8 → summary only (fading from memory)
+        - < 0.3  → re-include fully (forgotten)
         """
         current_turn = session.current_turn
+        half_life = max(self._decay_turns, 1)
+        decay_lambda = math.log(2) / half_life
 
         for node_id in list(subgraph.node_ids):
             entry = session.context_window.get(node_id)
@@ -63,16 +75,38 @@ class SessionService:
             if node is None:
                 continue
 
-            if turns_ago <= 1:
-                # Just provided — skip
+            # Base decay weight: 1.0 at turn 0, 0.5 at half_life turns ago
+            decay_weight = math.exp(-decay_lambda * turns_ago)
+
+            # Topic similarity bonus: if current query is close to the query
+            # that originally added this node, the LLM is more likely to still
+            # remember it — boost the decay weight.
+            if query_embedding and entry.query_embedding_at_addition:
+                topic_sim = self._cosine_similarity(
+                    query_embedding, entry.query_embedding_at_addition
+                )
+                # Boost: up to +0.2 for highly similar topics
+                decay_weight = min(1.0, decay_weight + 0.2 * max(0.0, topic_sim))
+
+            if decay_weight > 0.8:
+                # LLM still remembers — skip
                 subgraph.remove_node(node_id)
                 subgraph.add_note(
                     f"{node.name} already in context (turn {entry.turn_number})"
                 )
-            elif turns_ago <= 3:
-                # Recent — summary only
+            elif decay_weight > 0.3:
+                # Fading — summary only
                 node.raw_code = None
-            # else: re-include fully
+            # else: re-include fully (forgotten)
+
+    @staticmethod
+    def _cosine_similarity(a: list[float], b: list[float]) -> float:
+        dot = sum(x * y for x, y in zip(a, b))
+        norm_a = math.sqrt(sum(x * x for x in a))
+        norm_b = math.sqrt(sum(x * x for x in b))
+        if norm_a == 0 or norm_b == 0:
+            return 0.0
+        return dot / (norm_a * norm_b)
 
     def update_topic(self, session: Session, query_embedding: list[float]) -> None:
         """Update session topic vector using exponential moving average."""

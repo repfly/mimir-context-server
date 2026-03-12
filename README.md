@@ -31,9 +31,13 @@ Mimir indexes your code into a hierarchical graph of repositories, files, classe
 - **Cross-file symbol resolution** — automatically discovers `CALLS`, `USES_TYPE`, and `INHERITS` edges across files using tree-sitter AST analysis
 - **Hybrid search** — combines semantic embeddings, BM25 keyword matching, and name/path scoring for precise retrieval
 - **Live file watching** — monitors your repos for changes and re-indexes on every save, keeping the graph up to date without manual re-indexing
+- **Query intent classification** — automatically detects query type (locate, trace, write, debug) and tunes retrieval parameters accordingly
 - **Subgraph expansion** — automatically surfaces callers, callees, type definitions, and config references
+- **Structural embeddings** — symbols are embedded with their docstrings, callers, callees, and type relationships for richer semantic search
 - **Temporal reranking** — recently and frequently changed code scores higher
-- **Session deduplication** — code already sent to the LLM is summarised or omitted on subsequent turns
+- **Session deduplication** — exponential decay model tracks what the LLM remembers, with topic-aware boosting
+- **Write-path context** — shows interfaces, sibling implementations, test files, and DI registrations before you edit a file
+- **Impact analysis** — reverse-traces callers, type users, and transitive dependencies to show blast radius before refactoring
 - **Multi-repo** — single server spans multiple repositories with cross-repo edge detection
 - **Workspace isolation** — per-project indexes, agents can't cross project boundaries
 - **MCP server** — plug-and-play with Claude Desktop, Cursor, and any MCP-compatible IDE
@@ -176,7 +180,7 @@ batch_window_ms = 2000       # max ms to accumulate changes before forcing a flu
 ```
 Source files → Tree-sitter parse → Nodes & Edges → CodeGraph (NetworkX)
     → Cross-file symbol resolution (CALLS, USES_TYPE, INHERITS)
-    → Heuristic summaries → Embed all nodes
+    → Heuristic summaries → Structural embedding (code + docstrings + callers + callees + types)
     → Persist to SQLite + VectorStore
 ```
 
@@ -195,25 +199,25 @@ Each node represents a symbol (function, class, method, module) with its code, s
 
 ### Retrieval Pipeline
 
-1. **Embed query** — single forward pass through the embedding model
-2. **Hybrid search** — combines cosine similarity over embeddings, BM25 keyword scoring, and exact/fuzzy name and path matching. Results are fused with configurable `hybrid_alpha` weighting.
-3. **Hierarchical beam search** — containers first, then drill into symbols
-4. **Subgraph expansion** — BFS from seeds along typed edges, pruning by relevance gate
-5. **Type & config context** — include referenced type definitions and config nodes
-6. **Temporal reranking** — score = 0.5× retrieval + 0.2× recency + 0.15× change frequency + 0.15× co-retrieval
-7. **Budget fitting** — greedily drop lowest-scoring nodes until token count fits budget
-8. **Topological ordering** — order nodes by containment hierarchy for readability
+1. **Classify intent** — regex pattern matching detects query type (locate, trace, write, debug, general) and selects retrieval parameter profile
+2. **Embed query** — single forward pass through the embedding model
+3. **Hybrid search** — combines cosine similarity over embeddings, BM25 keyword scoring, and exact/fuzzy name and path matching. Alpha weighting is tuned per intent.
+4. **Hierarchical beam search** — containers first, then drill into symbols
+5. **Subgraph expansion** — BFS from seeds along typed edges, pruning by relevance gate. Expansion depth adapts per intent (1 hop for locate, 3 for trace).
+6. **Type & config context** — include referenced type definitions and config nodes
+7. **Temporal reranking** — score = 0.5× retrieval + 0.2× recency + 0.15× change frequency + 0.15× co-retrieval
+8. **Budget fitting** — greedily drop lowest-scoring nodes until token count fits budget
+9. **Topological ordering** — order nodes by containment hierarchy for readability
 
 ### Session Deduplication
 
-When using `session_id`, Mimir tracks what code has already been sent to the LLM:
+When using `session_id`, Mimir tracks what code has already been sent to the LLM using an exponential decay model:
 
-| Last sent | Behavior |
-|---|---|
-| Previous turn | Omitted entirely |
-| 2-5 turns ago | Summary only (raw code dropped) |
-| 5+ turns ago | Re-included fully |
-| Modified since last sent | Always re-included |
+- **Decay half-life** is `context_decay_turns` (default 5). At the half-life, the decay weight reaches 0.5.
+- **Topic similarity bonus**: if the current query is semantically close to the query that originally added a node, the decay weight is boosted (the LLM is more likely to still remember topic-relevant code).
+- **Decay weight > 0.8** → omitted (LLM still remembers)
+- **0.3 < weight ≤ 0.8** → summary only (fading from memory)
+- **weight ≤ 0.3** → re-included fully (forgotten)
 
 Co-retrieval learning tracks which nodes appear together and boosts similar nodes in future queries.
 
@@ -309,6 +313,8 @@ With live re-indexing:
 | Tool | Description |
 |---|---|
 | `get_context` | Retrieve relevant source code for a natural language query. Call before answering any codebase question. |
+| `get_write_context` | Get everything you need before editing a file: interfaces, sibling implementations, test file, DI registrations, and import graph. |
+| `get_impact` | Analyze what would break if you change a symbol or file: callers, type users, implementors, test files, and transitive dependencies. |
 | `get_graph_stats` | Node/edge counts, breakdown by kind and repo |
 | `get_hotspots` | Recently and frequently modified code |
 | `clear_data` | Wipe the index |
@@ -410,6 +416,8 @@ The shared server exposes a REST API for non-MCP clients (dashboards, CI pipelin
 |---|---|---|
 | `/api/v1/health` | GET | Health check — returns status, workspace name, node/edge counts |
 | `/api/v1/context` | POST | Search — `{"query": "...", "budget": 8000, "repos": ["api"], "session_id": "..."}` |
+| `/api/v1/write_context` | POST | Write-path context — `{"file_path": "src/auth/login.py"}` |
+| `/api/v1/impact` | POST | Impact analysis — `{"symbol_name": "AuthService", "max_hops": 3}` |
 | `/api/v1/stats` | GET | Graph statistics breakdown by kind and repo |
 | `/api/v1/hotspots` | GET | Recently/frequently changed code. Optional `?top=20` |
 | `/api/v1/clear` | POST | Clear index data — `{"graph": true, "sessions": true}` |
@@ -684,7 +692,7 @@ The client package has only 2 dependencies (`aiohttp`, `typer`) and does not req
 ├── mimir/                      # Server package (mimir-context-server)
 │   ├── domain/                 # Core models, config, graph, errors
 │   ├── ports/                  # Interface definitions (embedder, parser, stores)
-│   ├── services/               # Business logic (indexing, retrieval, temporal, session, watcher)
+│   ├── services/               # Business logic (indexing, retrieval, intent, write_context, impact, temporal, session, watcher)
 │   ├── infra/                  # Implementations (tree-sitter, embedders, SQLite, ChromaDB)
 │   ├── adapters/               # External interfaces (CLI, MCP, HTTP, web UI)
 │   └── container.py            # Dependency injection wiring
