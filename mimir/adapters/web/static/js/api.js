@@ -46,4 +46,12 @@ const Api = {
     async getHotspots(topN = 20) {
         return this.get(`/api/hotspots?top=${topN}`);
     },
+
+    async getQuality({ repos, threshold = 0.3, topN = 50 } = {}) {
+        const params = new URLSearchParams();
+        if (repos) params.set('repos', repos);
+        params.set('threshold', threshold.toString());
+        params.set('top_n', topN.toString());
+        return this.get(`/api/quality?${params}`);
+    },
 };

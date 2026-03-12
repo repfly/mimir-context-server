@@ -167,6 +167,17 @@ def run_web_server(config: MimirConfig, port: int = 8420) -> None:
             for n, s in results
         ])
 
+    @routes.get("/api/quality")
+    async def api_quality(request: web.Request) -> web.Response:
+        repos_param = request.query.get("repos")
+        repo_list = repos_param.split(",") if repos_param else None
+        threshold = float(request.query.get("threshold", "0.3"))
+        top_n = int(request.query.get("top_n", "50"))
+        overview = container.quality.detect_gaps(
+            graph, repos=repo_list, threshold=threshold, top_n=top_n,
+        )
+        return web.json_response(overview.to_dict())
+
     @routes.delete("/api/clear")
     async def api_clear(request: web.Request) -> web.Response:
         """Delete all locally stored index data.

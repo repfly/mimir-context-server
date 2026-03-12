@@ -139,6 +139,18 @@ def run_http_server(
             for n, s in results
         ])
 
+    @routes.get("/api/v1/quality")
+    async def api_quality(request: web.Request) -> web.Response:
+        """Analyze graph quality and detect gaps."""
+        repos_param = request.query.get("repos")
+        repos = repos_param.split(",") if repos_param else None
+        threshold = float(request.query.get("threshold", "0.3"))
+        top_n = int(request.query.get("top_n", "50"))
+        overview = container.quality.detect_gaps(
+            graph, repos=repos, threshold=threshold, top_n=top_n,
+        )
+        return web.json_response(overview.to_dict())
+
     @routes.post("/api/v1/clear")
     async def api_clear(request: web.Request) -> web.Response:
         nonlocal graph
@@ -253,6 +265,20 @@ def run_http_server(
                         "content": [{
                             "type": "text",
                             "text": json.dumps(hotspots, indent=2),
+                        }],
+                    }))
+
+                elif tool_name == "get_quality":
+                    overview = container.quality.detect_gaps(
+                        graph,
+                        repos=tool_args.get("repos"),
+                        threshold=tool_args.get("threshold"),
+                        top_n=tool_args.get("top_n", 50),
+                    )
+                    return web.json_response(_rpc_ok(request_id, {
+                        "content": [{
+                            "type": "text",
+                            "text": overview.format_for_llm(),
                         }],
                     }))
 
@@ -402,6 +428,30 @@ def _tool_definitions() -> list[dict]:
                     "top_n": {
                         "type": "integer",
                         "description": "Number of hotspots to return. Default: 20.",
+                    },
+                },
+            },
+        },
+        {
+            "name": "get_quality",
+            "description": (
+                "Analyze graph connectivity quality and detect gaps — nodes with missing connections."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repos": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional repo names to restrict analysis to.",
+                    },
+                    "threshold": {
+                        "type": "number",
+                        "description": "Quality threshold for gap detection. Default: 0.3.",
+                    },
+                    "top_n": {
+                        "type": "integer",
+                        "description": "Max gap nodes to return. Default: 50.",
                     },
                 },
             },

@@ -518,6 +518,65 @@ def hotspots(
 
 
 # ------------------------------------------------------------------
+# quality
+# ------------------------------------------------------------------
+
+@app.command()
+def quality(
+    threshold: float = typer.Option(0.3, "--threshold", "-t", help="Quality score threshold for gap detection"),
+    top: int = typer.Option(50, "--top", "-n", help="Maximum number of gaps to show"),
+    repos: Optional[str] = typer.Option(None, "--repos", help="Comma-separated repo names to filter"),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Named workspace from registry"),
+    config: Path = typer.Option(_DEFAULT_CONFIG, "--config", "-c"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Analyze graph quality and detect gaps in symbol resolution."""
+    _setup_logging(verbose)
+
+    cfg, _ = _load_config(config, workspace)
+    from mimir.container import Container
+    container = Container(cfg)
+
+    try:
+        graph = container.load_graph()
+        repo_list = repos.split(",") if repos else None
+        overview = container.quality.detect_gaps(
+            graph, repos=repo_list, threshold=threshold, top_n=top,
+        )
+
+        # Overview table
+        table = Table(title="Graph Quality Overview")
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", style="green")
+        table.add_row("Total Nodes", str(overview.total_nodes))
+        table.add_row("Scored Nodes", str(overview.scored_nodes))
+        table.add_row("Average Quality", f"{overview.avg_quality:.3f}")
+        table.add_row("Gaps Detected", str(overview.gap_count))
+        for bucket, count in sorted(overview.quality_distribution.items()):
+            table.add_row(f"  {bucket}", str(count))
+        console.print(table)
+
+        # Gaps table
+        if overview.gaps:
+            console.print()
+            gap_table = Table(title=f"Top {len(overview.gaps)} Gaps (quality < {threshold})")
+            gap_table.add_column("Node", style="cyan", max_width=60)
+            gap_table.add_column("Kind", style="yellow")
+            gap_table.add_column("Score", style="red")
+            gap_table.add_column("Reason", style="dim")
+            for gap in overview.gaps:
+                gap_table.add_row(
+                    gap.node_id, gap.node_kind,
+                    f"{gap.quality_score:.3f}", gap.reason,
+                )
+            console.print(gap_table)
+        else:
+            console.print("[green]No gaps detected — graph looks healthy![/]")
+    finally:
+        container.close()
+
+
+# ------------------------------------------------------------------
 # serve (MCP)
 # ------------------------------------------------------------------
 

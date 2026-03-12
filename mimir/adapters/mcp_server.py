@@ -182,6 +182,35 @@ def run_mcp_server(config: MimirConfig, workspace_name: str | None = None) -> No
                             },
                         },
                         {
+                            "name": "get_quality",
+                            "description": (
+                                "Analyze the connectivity quality of the code graph and detect gaps — nodes "
+                                "with missing or weak connections that may indicate under-indexed or poorly-resolved "
+                                "areas of the codebase. Returns a quality overview with average scores, distribution, "
+                                "and a list of the worst-connected nodes with diagnostic reasons. "
+                                "Call this to assess index health, find areas that need re-indexing, or understand "
+                                "which parts of the codebase have incomplete symbol resolution."
+                            ),
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "repos": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": "Optional list of repo names to restrict analysis to.",
+                                    },
+                                    "threshold": {
+                                        "type": "number",
+                                        "description": "Quality score threshold below which nodes are flagged as gaps. Default: 0.3.",
+                                    },
+                                    "top_n": {
+                                        "type": "integer",
+                                        "description": "Maximum number of gap nodes to return. Default: 50.",
+                                    },
+                                },
+                            },
+                        },
+                        {
                             "name": "clear_data",
                             "description": (
                                 "Delete locally stored index data. "
@@ -302,6 +331,20 @@ def run_mcp_server(config: MimirConfig, workspace_name: str | None = None) -> No
                         "content": [{
                             "type": "text",
                             "text": text,
+                        }],
+                    })
+
+                elif tool_name == "get_quality":
+                    overview = container.quality.detect_gaps(
+                        graph,
+                        repos=tool_args.get("repos"),
+                        threshold=tool_args.get("threshold"),
+                        top_n=tool_args.get("top_n", 50),
+                    )
+                    return _response(request_id, {
+                        "content": [{
+                            "type": "text",
+                            "text": overview.format_for_llm(),
                         }],
                     })
 
