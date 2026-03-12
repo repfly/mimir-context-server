@@ -10,6 +10,7 @@ import logging
 import math
 import re
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 from mimir.domain.config import MimirConfig
@@ -22,6 +23,8 @@ from mimir.services.intent import classify_intent, INTENT_PROFILES
 
 if TYPE_CHECKING:
     from mimir.services.quality import QualityService
+    from mimir.services.temporal import TemporalService
+    from mimir.infra.stores.sqlite_graph import SqliteGraphStore
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +42,20 @@ class RetrievalService:
         self._embedder = embedder
         self._vector_store = vector_store
         self._quality_service: Optional[QualityService] = None
+        self._temporal_service: Optional[TemporalService] = None
+        self._graph_store: Optional[SqliteGraphStore] = None
 
     def set_quality_service(self, quality_service: QualityService) -> None:
         """Inject the quality service for connectivity-aware scoring."""
         self._quality_service = quality_service
+
+    def set_temporal_service(self, temporal_service: TemporalService) -> None:
+        """Inject the temporal service for co-retrieval tracking."""
+        self._temporal_service = temporal_service
+
+    def set_graph_store(self, graph_store: SqliteGraphStore) -> None:
+        """Inject the graph store for persisting retrieval metadata."""
+        self._graph_store = graph_store
 
     async def search(
         self,
@@ -158,10 +171,13 @@ class RetrievalService:
         # Step 5: Fit to budget
         self._fit_to_budget(subgraph, budget, seed_ids={n.id for n in seed_nodes})
 
-        # Step 6: Topological ordering
+        # Step 6: Update retrieval metadata on retrieved nodes
+        self._update_retrieval_metadata(list(subgraph.nodes.values()))
+
+        # Step 7: Topological ordering
         ordered = self._topological_order(subgraph)
 
-        # Step 7: Build final bundle
+        # Step 8: Build final bundle
         return ContextBundle(
             nodes=ordered,
             edges=subgraph.edges,
@@ -559,6 +575,25 @@ class RetrievalService:
         leaves.sort(key=key, reverse=True)
 
         return types + configs + others + leaves
+
+    # ------------------------------------------------------------------
+    # Retrieval metadata
+    # ------------------------------------------------------------------
+
+    def _update_retrieval_metadata(self, nodes: list[Node]) -> None:
+        """Update retrieval_count, last_retrieved, and co-retrieval on nodes."""
+        now = datetime.now(timezone.utc).isoformat()
+        for node in nodes:
+            node.retrieval_count += 1
+            node.last_retrieved = now
+
+        # Update co-retrieval counts
+        if self._temporal_service is not None:
+            self._temporal_service.update_co_retrieval(nodes)
+
+        # Persist to graph store
+        if self._graph_store is not None:
+            self._graph_store.update_retrieval_metadata(nodes)
 
     # ------------------------------------------------------------------
     # Quality adjustment

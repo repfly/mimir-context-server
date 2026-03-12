@@ -318,6 +318,28 @@ class SqliteGraphStore:
         except sqlite3.Error as exc:
             raise StorageError(f"Failed to get repo states: {exc}") from exc
 
+    def update_retrieval_metadata(self, nodes: list) -> None:
+        """Persist retrieval_count, last_retrieved, and co_retrieved_with for the given nodes.
+
+        This is a lightweight partial update — only touches metadata columns,
+        not the full node row.
+        """
+        if not nodes:
+            return
+        try:
+            self._conn.executemany(
+                "UPDATE nodes SET retrieval_count = ?, last_retrieved = ?, "
+                "co_retrieved_with = ? WHERE id = ?",
+                [
+                    (n.retrieval_count, n.last_retrieved,
+                     json.dumps(n.co_retrieved_with), n.id)
+                    for n in nodes
+                ],
+            )
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            logger.warning("Failed to update retrieval metadata: %s", exc)
+
     def vacuum(self) -> None:
         """Compact the database file to reclaim unused space."""
         try:

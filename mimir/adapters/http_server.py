@@ -9,7 +9,8 @@ Endpoints
 POST /api/v1/context     — get_context (primary search tool)
 GET  /api/v1/stats       — get_graph_stats
 GET  /api/v1/hotspots    — get_hotspots
-POST /api/v1/clear       — clear_data
+GET  /api/v1/quality     — get_quality
+POST /api/v1/clear       — clear_data (admin only, not exposed via MCP)
 GET  /api/v1/health      — health check
 
 POST /api/v1/mcp         — raw MCP JSON-RPC (for MCP-over-HTTP proxy clients)
@@ -97,7 +98,9 @@ def run_http_server(
             if session_id:
                 session = container.session.get_or_create(session_id)
                 sg = _bundle_to_subgraph(bundle)
-                container.session.session_dedup(sg, session)
+                container.session.session_dedup(
+                    sg, session, query_embedding=bundle.query_embedding,
+                )
                 bundle.nodes = list(sg.nodes.values())
                 bundle.edges = sg.edges
                 bundle.token_count = sg.token_estimate
@@ -110,6 +113,7 @@ def run_http_server(
                     query,
                     bundle.nodes,
                     {n.id: 1.0 for n in bundle.nodes},
+                    query_embedding=bundle.query_embedding,
                 )
 
             return web.json_response({
@@ -177,7 +181,6 @@ def run_http_server(
         This is how ``mimir serve --remote`` connects: it wraps each
         stdio JSON-RPC message in an HTTP POST to this endpoint.
         """
-        nonlocal graph
         try:
             rpc_request = await request.json()
         except Exception:
@@ -222,7 +225,9 @@ def run_http_server(
                     if session_id:
                         session = container.session.get_or_create(session_id)
                         sg = _bundle_to_subgraph(bundle)
-                        container.session.session_dedup(sg, session)
+                        container.session.session_dedup(
+                            sg, session, query_embedding=bundle.query_embedding,
+                        )
                         bundle.nodes = list(sg.nodes.values())
                         bundle.edges = sg.edges
                         bundle.token_count = sg.token_estimate
@@ -236,6 +241,7 @@ def run_http_server(
                             tool_args["query"],
                             bundle.nodes,
                             {n.id: 1.0 for n in bundle.nodes},
+                            query_embedding=bundle.query_embedding,
                         )
                     return web.json_response(_rpc_ok(request_id, {
                         "content": [{
@@ -279,20 +285,6 @@ def run_http_server(
                         "content": [{
                             "type": "text",
                             "text": overview.format_for_llm(),
-                        }],
-                    }))
-
-                elif tool_name == "clear_data":
-                    result = container.clear_data(
-                        graph=tool_args.get("graph", True),
-                        sessions=tool_args.get("sessions", True),
-                    )
-                    if tool_args.get("graph", True):
-                        graph = container.load_graph()
-                    return web.json_response(_rpc_ok(request_id, {
-                        "content": [{
-                            "type": "text",
-                            "text": json.dumps(result),
                         }],
                     }))
 
@@ -453,17 +445,6 @@ def _tool_definitions() -> list[dict]:
                         "type": "integer",
                         "description": "Max gap nodes to return. Default: 50.",
                     },
-                },
-            },
-        },
-        {
-            "name": "clear_data",
-            "description": "Delete locally stored index data.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "graph": {"type": "boolean", "description": "Clear graph. Default: true."},
-                    "sessions": {"type": "boolean", "description": "Clear sessions. Default: true."},
                 },
             },
         },

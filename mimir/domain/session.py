@@ -118,8 +118,24 @@ class Session:
                 query_embedding_at_addition=query_embedding,
             )
 
+    def prune(self, max_context_entries: int = 500, max_query_history: int = 100) -> None:
+        """Prune old context entries and query history to bound session size.
+
+        Keeps the most recent entries by turn number.
+        """
+        if len(self.context_window) > max_context_entries:
+            sorted_entries = sorted(
+                self.context_window.items(),
+                key=lambda kv: kv[1].turn_number,
+                reverse=True,
+            )
+            self.context_window = dict(sorted_entries[:max_context_entries])
+
+        if len(self.query_history) > max_query_history:
+            self.query_history = self.query_history[-max_query_history:]
+
     def to_dict(self) -> dict:
-        return {
+        d = {
             "session_id": self.session_id,
             "started_at": self.started_at.isoformat(),
             "context_window": {
@@ -127,6 +143,9 @@ class Session:
             },
             "query_history": [q.to_dict() for q in self.query_history],
         }
+        if self.session_topic_embedding is not None:
+            d["session_topic_embedding"] = self.session_topic_embedding
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> Session:
@@ -142,4 +161,5 @@ class Session:
             QueryRecord.from_dict(q)
             for q in data.get("query_history", [])
         ]
+        session.session_topic_embedding = data.get("session_topic_embedding")
         return session
