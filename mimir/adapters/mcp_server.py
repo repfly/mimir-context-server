@@ -39,7 +39,6 @@ def run_mcp_server(config: MimirConfig, workspace_name: str | None = None) -> No
 
     async def handle_request(request: dict) -> dict:
         """Route MCP JSON-RPC requests."""
-        nonlocal graph  # clear_data may reload the graph; declare nonlocal to avoid UnboundLocalError
         method = request.get("method", "")
         params = request.get("params", {})
         request_id = request.get("id")
@@ -210,29 +209,6 @@ def run_mcp_server(config: MimirConfig, workspace_name: str | None = None) -> No
                                 },
                             },
                         },
-                        {
-                            "name": "clear_data",
-                            "description": (
-                                "Delete locally stored index data. "
-                                "Call this when the user explicitly asks to clear, reset, or wipe the index, "
-                                "or when the codebase has changed significantly and needs to be re-indexed from scratch. "
-                                "After clearing the graph, the user must run `mimir index` before queries will work again. "
-                                "Clearing sessions only removes conversation history and does not affect the code index."
-                            ),
-                            "inputSchema": {
-                                "type": "object",
-                                "properties": {
-                                    "graph": {
-                                        "type": "boolean",
-                                        "description": "Clear the code graph and all embeddings. Default: true.",
-                                    },
-                                    "sessions": {
-                                        "type": "boolean",
-                                        "description": "Clear all conversation sessions. Default: true.",
-                                    },
-                                },
-                            },
-                        },
                     ],
                 })
 
@@ -345,20 +321,6 @@ def run_mcp_server(config: MimirConfig, workspace_name: str | None = None) -> No
                         "content": [{
                             "type": "text",
                             "text": overview.format_for_llm(),
-                        }],
-                    })
-
-                elif tool_name == "clear_data":
-                    clear_graph = tool_args.get("graph", True)
-                    clear_sessions = tool_args.get("sessions", True)
-                    result = container.clear_data(graph=clear_graph, sessions=clear_sessions)
-                    # Reload graph after clearing so subsequent calls work correctly
-                    if clear_graph:
-                        graph = container.load_graph()
-                    return _response(request_id, {
-                        "content": [{
-                            "type": "text",
-                            "text": json.dumps(result),
                         }],
                     })
 

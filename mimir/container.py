@@ -82,6 +82,8 @@ class Container:
         self.quality = QualityService()
         self.temporal.set_quality_service(self.quality)
         self.retrieval.set_quality_service(self.quality)
+        self.retrieval.set_temporal_service(self.temporal)
+        self.retrieval.set_graph_store(self.graph_store)
 
     def _build_embedder(self):
         model = self.config.embeddings.model

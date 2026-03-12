@@ -136,6 +136,8 @@ class SessionService:
         )
         if query_embedding:
             self.update_topic(session, query_embedding)
+        # Prune to prevent unbounded growth before persisting
+        session.prune()
         self._store.save(session)
 
     def get_session_state(self, session_id: str) -> Optional[dict]:
