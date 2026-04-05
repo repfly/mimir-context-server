@@ -29,6 +29,12 @@ mimir-self.toml
 # Example repos (local test fixtures)
 example-*/
 
+# Node / Backstage plugin
+node_modules/
+
 # IDE
 .vscode/
 .idea/
+
+# Claude Code
+.claude/

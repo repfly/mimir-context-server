@@ -80,6 +80,10 @@ class Container:
 
         from mimir.services.quality import QualityService
         self.quality = QualityService()
+
+        from mimir.services.catalog import CatalogService
+        self.catalog = CatalogService(quality_service=self.quality, config=config)
+
         self.temporal.set_quality_service(self.quality)
         self.retrieval.set_quality_service(self.quality)
         self.retrieval.set_temporal_service(self.temporal)

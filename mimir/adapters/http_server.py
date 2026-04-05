@@ -6,12 +6,15 @@ indexed codebase.
 
 Endpoints
 ---------
-POST /api/v1/context     — get_context (primary search tool)
-GET  /api/v1/stats       — get_graph_stats
-GET  /api/v1/hotspots    — get_hotspots
-GET  /api/v1/quality     — get_quality
-POST /api/v1/clear       — clear_data (admin only, not exposed via MCP)
-GET  /api/v1/health      — health check
+POST /api/v1/context        — get_context (primary search tool)
+GET  /api/v1/stats          — get_graph_stats
+GET  /api/v1/hotspots       — get_hotspots
+GET  /api/v1/quality        — get_quality
+GET  /api/v1/catalog        — Backstage-compatible service catalog
+GET  /api/v1/catalog/{repo} — single-service catalog entry
+POST /api/v1/catalog/drift  — dependency drift detection
+POST /api/v1/clear          — clear_data (admin only, not exposed via MCP)
+GET  /api/v1/health         — health check
 
 POST /api/v1/mcp         — raw MCP JSON-RPC (for MCP-over-HTTP proxy clients)
 """
@@ -155,6 +158,63 @@ def run_http_server(
         )
         return web.json_response(overview.to_dict())
 
+    # ------------------------------------------------------------------
+    # Catalog API (Backstage integration)
+    # ------------------------------------------------------------------
+
+    @routes.get("/api/v1/catalog")
+    async def api_catalog(request: web.Request) -> web.Response:
+        """Generate Backstage-compatible service catalog from the code graph."""
+        try:
+            repos_param = request.query.get("repos")
+            repos = repos_param.split(",") if repos_param else None
+            response = container.catalog.generate_catalog(graph, repos=repos)
+            return web.json_response(response.to_dict())
+        except Exception as exc:
+            logger.error("Catalog generation failed: %s", exc, exc_info=True)
+            return web.json_response({"error": str(exc)}, status=500)
+
+    @routes.get("/api/v1/catalog/{repo}")
+    async def api_catalog_service(request: web.Request) -> web.Response:
+        """Get catalog entry for a single service/repo."""
+        repo = request.match_info["repo"]
+        try:
+            response = container.catalog.generate_catalog(graph, repos=[repo])
+            if not response.services:
+                return web.json_response(
+                    {"error": f"Repo '{repo}' not found in graph"}, status=404,
+                )
+            return web.json_response(response.services[0].to_dict())
+        except Exception as exc:
+            logger.error("Catalog single-service failed: %s", exc, exc_info=True)
+            return web.json_response({"error": str(exc)}, status=500)
+
+    @routes.post("/api/v1/catalog/drift")
+    async def api_catalog_drift(request: web.Request) -> web.Response:
+        """Compare declared dependencies against code-analyzed reality."""
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+        repo = body.get("repo")
+        if not repo:
+            return web.json_response({"error": "Missing 'repo' field"}, status=400)
+
+        declared_deps = body.get("declared_dependencies", [])
+        try:
+            report = container.catalog.detect_drift(
+                graph, repo, declared_deps,
+            )
+            return web.json_response(report.to_dict())
+        except Exception as exc:
+            logger.error("Drift detection failed: %s", exc, exc_info=True)
+            return web.json_response({"error": str(exc)}, status=500)
+
+    # ------------------------------------------------------------------
+    # Admin
+    # ------------------------------------------------------------------
+
     @routes.post("/api/v1/clear")
     async def api_clear(request: web.Request) -> web.Response:
         nonlocal graph
@@ -285,6 +345,30 @@ def run_http_server(
                         "content": [{
                             "type": "text",
                             "text": overview.format_for_llm(),
+                        }],
+                    }))
+
+                elif tool_name == "get_catalog":
+                    cat_response = container.catalog.generate_catalog(
+                        graph, repos=tool_args.get("repos"),
+                    )
+                    return web.json_response(_rpc_ok(request_id, {
+                        "content": [{
+                            "type": "text",
+                            "text": cat_response.format_for_llm(),
+                        }],
+                    }))
+
+                elif tool_name == "get_catalog_drift":
+                    drift_report = container.catalog.detect_drift(
+                        graph,
+                        repo=tool_args["repo"],
+                        declared_deps=tool_args.get("declared_dependencies", []),
+                    )
+                    return web.json_response(_rpc_ok(request_id, {
+                        "content": [{
+                            "type": "text",
+                            "text": drift_report.format_for_llm(),
                         }],
                     }))
 
@@ -446,6 +530,52 @@ def _tool_definitions() -> list[dict]:
                         "description": "Max gap nodes to return. Default: 50.",
                     },
                 },
+            },
+        },
+        {
+            "name": "get_catalog",
+            "description": (
+                "Generate a Backstage-compatible service catalog from the code graph. "
+                "Returns services with APIs, dependencies, tech stack, ownership, and quality."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repos": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional repo names to include. Omit for all repos.",
+                    },
+                },
+            },
+        },
+        {
+            "name": "get_catalog_drift",
+            "description": (
+                "Compare declared dependencies against code-analyzed reality. "
+                "Returns drift score and categorized findings."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "repo": {
+                        "type": "string",
+                        "description": "Repository name to check.",
+                    },
+                    "declared_dependencies": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "type": {"type": "string"},
+                            },
+                            "required": ["name"],
+                        },
+                        "description": "Declared dependencies to compare against.",
+                    },
+                },
+                "required": ["repo", "declared_dependencies"],
             },
         },
     ]
