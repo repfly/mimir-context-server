@@ -209,6 +209,55 @@ def run_mcp_server(config: MimirConfig, workspace_name: str | None = None) -> No
                                 },
                             },
                         },
+                        {
+                            "name": "get_catalog",
+                            "description": (
+                                "Generate a Backstage-compatible service catalog from the code graph. "
+                                "Returns discovered services with their APIs, cross-repo dependencies, "
+                                "tech stack, ownership, and quality scores. "
+                                "Use `repos` to restrict to specific repositories."
+                            ),
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "repos": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": "Optional list of repo names to include. Omit for all repos.",
+                                    },
+                                },
+                            },
+                        },
+                        {
+                            "name": "get_catalog_drift",
+                            "description": (
+                                "Compare declared service dependencies against what the code graph actually shows. "
+                                "Detects undeclared dependencies (in code but not in catalog) and missing dependencies "
+                                "(declared but no code evidence). Returns a drift score from 0 (perfect) to 1 (fully mismatched)."
+                            ),
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "repo": {
+                                        "type": "string",
+                                        "description": "Repository name to check drift for.",
+                                    },
+                                    "declared_dependencies": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "name": {"type": "string"},
+                                                "type": {"type": "string"},
+                                            },
+                                            "required": ["name"],
+                                        },
+                                        "description": "List of declared dependencies, each with a 'name' and optional 'type'.",
+                                    },
+                                },
+                                "required": ["repo", "declared_dependencies"],
+                            },
+                        },
                     ],
                 })
 
@@ -321,6 +370,30 @@ def run_mcp_server(config: MimirConfig, workspace_name: str | None = None) -> No
                         "content": [{
                             "type": "text",
                             "text": overview.format_for_llm(),
+                        }],
+                    })
+
+                elif tool_name == "get_catalog":
+                    response = container.catalog.generate_catalog(
+                        graph, repos=tool_args.get("repos"),
+                    )
+                    return _response(request_id, {
+                        "content": [{
+                            "type": "text",
+                            "text": response.format_for_llm(),
+                        }],
+                    })
+
+                elif tool_name == "get_catalog_drift":
+                    report = container.catalog.detect_drift(
+                        graph,
+                        repo=tool_args["repo"],
+                        declared_deps=tool_args.get("declared_dependencies", []),
+                    )
+                    return _response(request_id, {
+                        "content": [{
+                            "type": "text",
+                            "text": report.format_for_llm(),
                         }],
                     })
 

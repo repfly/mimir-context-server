@@ -40,6 +40,7 @@ Mimir indexes your code into a hierarchical graph of repositories, files, classe
 - **Session deduplication** — exponential decay model tracks what the LLM remembers, with topic-aware boosting
 - **Write-path context** — shows interfaces, sibling implementations, test files, and DI registrations before you edit a file
 - **Impact analysis** — reverse-traces callers, type users, and transitive dependencies to show blast radius before refactoring
+- **Backstage catalog integration** — auto-populates a Backstage service catalog from the code graph: discovers services, APIs, cross-repo dependencies, tech stacks, and ownership from git history — no manual `catalog-info.yaml` maintenance. Includes dependency drift detection comparing declared vs. actual dependencies.
 - **Multi-repo** — single server spans multiple repositories with cross-repo edge detection
 - **Workspace isolation** — per-project indexes, agents can't cross project boundaries
 - **MCP server** — plug-and-play with Claude Desktop, Cursor, and any MCP-compatible IDE
@@ -350,6 +351,8 @@ With live re-indexing:
 | `get_write_context` | Get everything you need before editing a file: interfaces, sibling implementations, test file, DI registrations, and import graph. |
 | `get_impact` | Analyze what would break if you change a symbol or file: callers, type users, implementors, test files, and transitive dependencies. |
 | `get_quality` | Analyze graph connectivity quality and detect gaps — nodes with missing or weak connections that may indicate under-indexed areas. |
+| `get_catalog` | Generate a Backstage-compatible service catalog: services, APIs, dependencies, tech stack, ownership, and quality scores. |
+| `get_catalog_drift` | Compare declared service dependencies against code-analyzed reality. Detects undeclared and missing dependencies with a drift score. |
 | `get_graph_stats` | Node/edge counts, breakdown by kind and repo |
 | `get_hotspots` | Recently and frequently modified code |
 | `clear_data` | Wipe the index |
@@ -456,6 +459,9 @@ The shared server exposes a REST API for non-MCP clients (dashboards, CI pipelin
 | `/api/v1/stats` | GET | Graph statistics breakdown by kind and repo |
 | `/api/v1/hotspots` | GET | Recently/frequently changed code. Optional `?top=20` |
 | `/api/v1/quality` | GET | Graph quality overview and gap detection. Optional `?threshold=0.3&top_n=50&repos=my-api` |
+| `/api/v1/catalog` | GET | Backstage-compatible service catalog. Optional `?repos=svc-a,svc-b` |
+| `/api/v1/catalog/{repo}` | GET | Single-service catalog entry |
+| `/api/v1/catalog/drift` | POST | Dependency drift detection — `{"repo": "my-api", "declared_dependencies": [{"name": "svc-b"}]}` |
 | `/api/v1/clear` | POST | Clear index data — `{"graph": true, "sessions": true}` |
 | `/api/v1/mcp` | POST | Raw MCP JSON-RPC passthrough (used by `--remote` proxy) |
 
@@ -652,6 +658,57 @@ Explore nodes by kind and repo, inspect edges, view cross-repo links, and drill 
 
 ---
 
+## Backstage Integration
+
+Mimir includes a Backstage catalog backend module that auto-populates your service catalog directly from the code graph — no manual `catalog-info.yaml` maintenance.
+
+### What Gets Auto-Discovered
+
+| Data | Source |
+|---|---|
+| **Services** | Each indexed repository becomes a Component entity |
+| **APIs** | Route decorators (`@app.get`, `@router.post`, etc.) become API entities |
+| **Dependencies** | Cross-repo `CALLS`, `IMPORTS`, `SHARED_LIB` edges become `dependsOn`/`consumesApis` relations |
+| **Tech stack** | File extensions → languages, import analysis → frameworks (Flask, FastAPI, Spring, etc.) |
+| **Ownership** | Top git committer per repo → Backstage `owner` field (`user:email@example.com`) |
+| **Quality scores** | Graph connectivity metrics per service |
+
+### Setup
+
+1. Start the Mimir HTTP server: `mimir serve --http`
+2. Install the plugin in your Backstage backend:
+   ```bash
+   yarn --cwd packages/backend add @mimir/plugin-catalog-backend-module-mimir
+   ```
+3. Register it in `packages/backend/src/index.ts`:
+   ```typescript
+   backend.add(import('@mimir/plugin-catalog-backend-module-mimir'));
+   ```
+4. Configure in `app-config.yaml`:
+   ```yaml
+   catalog:
+     providers:
+       mimir:
+         baseUrl: http://localhost:8421
+         refreshIntervalMinutes: 30
+   ```
+
+### Dependency Drift Detection
+
+Compare what your catalog declares vs. what the code actually shows:
+
+```bash
+curl -X POST http://localhost:8421/api/v1/catalog/drift \
+  -H 'Content-Type: application/json' \
+  -d '{"repo": "my-api", "declared_dependencies": [{"name": "auth-service"}]}'
+```
+
+Returns `confirmed`, `undeclared` (in code but not declared), and `missing_in_code` entries with a drift score from 0.0 (perfect match) to 1.0 (fully mismatched).
+
+See the [plugin README](backstage-plugin/plugins/catalog-backend-module-mimir/README.md) for full documentation.
+
+---
+
 ## Data Storage
 
 Mimir stores all index data in a local directory (default `.mimir/`, configurable via `data_dir` in config):
@@ -727,12 +784,14 @@ The client package has only 2 dependencies (`aiohttp`, `typer`) and does not req
 
 ```
 ├── mimir/                      # Server package (mimir-context-server)
-│   ├── domain/                 # Core models, config, graph, errors
+│   ├── domain/                 # Core models, config, graph, catalog, errors
 │   ├── ports/                  # Interface definitions (embedder, parser, stores)
-│   ├── services/               # Business logic (indexing, retrieval, intent, write_context, impact, temporal, session, quality, watcher)
+│   ├── services/               # Business logic (indexing, retrieval, catalog, impact, temporal, session, quality, watcher)
 │   ├── infra/                  # Implementations (tree-sitter, embedders, SQLite, ChromaDB)
 │   ├── adapters/               # External interfaces (CLI, MCP, HTTP, web UI)
 │   └── container.py            # Dependency injection wiring
+├── backstage-plugin/           # Backstage catalog backend module
+│   └── plugins/catalog-backend-module-mimir/
 ├── client/                     # Client package (mimir-server-client)
 │   └── mimir_client/           # Lightweight MCP proxy + health check CLI
 ├── tests/                      # Test suite
