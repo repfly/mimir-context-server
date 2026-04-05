@@ -1,0 +1,27 @@
+name: Mimir Architecture Guardrails
+on: [pull_request]
+
+jobs:
+  guardrail-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Mimir
+        run: pip install mimir-context-server
+
+      - name: Build index (incremental)
+        run: mimir index
+
+      - name: Run guardrails
+        run: |
+          git diff origin/${{ github.base_ref }}...HEAD | \
+            mimir guardrail check --diff - --rules mimir-rules.yaml --output github-pr-comment \
+            >> $GITHUB_STEP_SUMMARY

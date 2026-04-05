@@ -1,0 +1,101 @@
+rules:
+  # --- Layer enforcement ---
+  - id: no-domain-to-infra
+    type: dependency_ban
+    description: "Domain layer must not import from infrastructure"
+    severity: error
+    config:
+      source_pattern: "*/domain/**"
+      target_pattern: "*/infra/**"
+
+  - id: no-adapter-to-service-internals
+    type: dependency_ban
+    description: "Adapters must go through service interfaces, not internal helpers"
+    severity: warning
+    config:
+      source_pattern: "*/adapters/**"
+      target_pattern: "*/services/_*"
+
+  # --- Cross-service boundaries ---
+  - id: no-cross-service-db
+    type: dependency_ban
+    description: "Services must not access another service's database models directly"
+    severity: error
+    config:
+      source_repo: "*"
+      target_repo: "*"
+      target_pattern: "*/models/db_*"
+      source_pattern: "*"
+      edge_kind: [imports, uses_type]
+      cross_repo_only: true
+
+  # --- Cycle prevention ---
+  - id: no-circular-services
+    type: cycle_detection
+    description: "No circular dependencies between services"
+    severity: error
+    config:
+      scope: cross_repo
+      edge_kinds: [api_calls, shared_lib]
+
+  - id: no-circular-modules
+    type: cycle_detection
+    description: "No circular imports within a repository"
+    severity: warning
+    config:
+      scope: intra_repo
+      edge_kinds: [imports]
+
+  # --- Coupling limits ---
+  - id: max-inbound-coupling
+    type: metric_threshold
+    description: "No module should have more than 20 inbound dependencies"
+    severity: warning
+    config:
+      metric: afferent_coupling
+      threshold: 20
+
+  - id: max-instability
+    type: metric_threshold
+    description: "Core modules should be stable (low instability ratio)"
+    severity: warning
+    config:
+      metric: instability
+      threshold: 0.8
+      target_pattern: "*/domain/**"
+
+  # --- Blast radius protection ---
+  - id: api-change-blast-radius
+    type: impact_threshold
+    description: "Public API changes must not affect more than 15 consumers"
+    severity: error
+    config:
+      target_kind: [api_endpoint]
+      max_impact: 15
+      max_hops: 3
+
+  - id: core-interface-blast-radius
+    type: impact_threshold
+    description: "Changes to core interfaces require review if blast radius > 10"
+    severity: error
+    config:
+      target_kind: [class, type]
+      target_pattern: "*/ports/**"
+      max_impact: 10
+
+  # --- Agent scope restrictions ---
+  - id: protect-auth
+    type: file_scope_ban
+    description: "Auth module requires human review"
+    severity: block
+    config:
+      path_pattern: "*/auth/**"
+      require_human_approval: true
+
+  - id: protect-billing
+    type: file_scope_ban
+    description: "Billing module requires human review"
+    severity: block
+    config:
+      path_pattern: "*/billing/**"
+      require_human_approval: true

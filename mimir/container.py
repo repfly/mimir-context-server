@@ -84,6 +84,20 @@ class Container:
         from mimir.services.catalog import CatalogService
         self.catalog = CatalogService(quality_service=self.quality, config=config)
 
+        # Guardrails
+        from mimir.services.diff_analyzer import DiffAnalyzer
+        self.diff_analyzer = DiffAnalyzer(parser=self.parser)
+
+        from mimir.services.guardrail import GuardrailService
+        self.guardrail = GuardrailService(
+            impact_service=self.impact,
+            quality_service=self.quality,
+            diff_analyzer=self.diff_analyzer,
+        )
+
+        from mimir.services.agent_policy import AgentPolicyService
+        self.agent_policy = AgentPolicyService(impact_service=self.impact)
+
         self.temporal.set_quality_service(self.quality)
         self.retrieval.set_quality_service(self.quality)
         self.retrieval.set_temporal_service(self.temporal)

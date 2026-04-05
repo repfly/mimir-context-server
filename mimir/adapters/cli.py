@@ -179,6 +179,158 @@ def workspace_remove(
 
 
 # ------------------------------------------------------------------
+# guardrail sub-app
+# ------------------------------------------------------------------
+
+guardrail_app = typer.Typer(
+    name="guardrail",
+    help="Architectural guardrails — validate changes against structural rules.",
+    no_args_is_help=True,
+)
+app.add_typer(guardrail_app, name="guardrail")
+
+
+@guardrail_app.command("check")
+def guardrail_check(
+    diff: str = typer.Option(
+        "-", "--diff", "-d",
+        help="Path to diff file, or '-' for stdin (default: stdin)",
+    ),
+    rules: Path = typer.Option(
+        Path("mimir-rules.yaml"), "--rules", "-r",
+        help="Path to rules YAML file",
+    ),
+    output: str = typer.Option(
+        "text", "--output", "-o",
+        help="Output format: text, json, github-pr-comment",
+    ),
+    config: Path = typer.Option(_DEFAULT_CONFIG, "--config", "-c"),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Validate a diff against architectural rules."""
+    _setup_logging(verbose)
+    from mimir.domain.guardrails_config import load_rules
+    from mimir.services.guardrail_report import GuardrailReporter
+
+    # Load rules (fail-closed)
+    try:
+        rule_list = load_rules(rules)
+    except Exception as exc:
+        console.print(f"[red bold]Rule loading error:[/] {exc}")
+        raise typer.Exit(1) from exc
+
+    # Read diff
+    if diff == "-":
+        diff_text = sys.stdin.read()
+    else:
+        diff_path = Path(diff)
+        if not diff_path.exists():
+            console.print(f"[red bold]Diff file not found:[/] {diff}")
+            raise typer.Exit(1)
+        diff_text = diff_path.read_text()
+
+    if not diff_text.strip():
+        console.print("[yellow]Empty diff — nothing to check.[/]")
+        raise typer.Exit(0)
+
+    # Load config and container
+    try:
+        cfg, ws_name = _load_config(config, workspace)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        console.print(f"[red bold]Config error:[/] {exc}")
+        raise typer.Exit(1) from exc
+
+    from mimir.container import Container
+    container = Container(cfg)
+    graph = container.load_graph()
+
+    # Evaluate
+    result = asyncio.run(container.guardrail.evaluate(graph, diff_text, rule_list))
+
+    # Format output
+    reporter = GuardrailReporter()
+    if output == "json":
+        console.print_json(json.dumps(result.to_dict(), indent=2))
+    elif output == "github-pr-comment":
+        console.print(reporter.format_github_pr_comment(result))
+    else:
+        console.print(reporter.format_text(result))
+
+    if not result.passed:
+        raise typer.Exit(1)
+
+
+@guardrail_app.command("init")
+def guardrail_init(
+    force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing files"),
+) -> None:
+    """Generate example mimir-rules.yaml and mimir-agent-policy.yaml."""
+    import shutil
+
+    examples = {
+        "mimir-rules.yaml": Path(__file__).parent.parent.parent / "mimir-rules.yaml",
+        "mimir-agent-policy.yaml": Path(__file__).parent.parent.parent / "mimir-agent-policy.yaml",
+    }
+
+    for name, source in examples.items():
+        target = Path(name)
+        if target.exists() and not force:
+            console.print(f"[yellow]Skipping {name} (already exists, use --force to overwrite)[/]")
+            continue
+        if source.exists():
+            shutil.copy2(source, target)
+            console.print(f"[green]Created {name}[/]")
+        else:
+            console.print(f"[yellow]Template {name} not found in package[/]")
+
+    console.print("\n[bold]Next steps:[/]")
+    console.print("  1. Edit mimir-rules.yaml to match your architecture")
+    console.print("  2. Run: git diff | mimir guardrail check --diff -")
+
+
+@guardrail_app.command("test")
+def guardrail_test(
+    rules: Path = typer.Option(
+        Path("mimir-rules.yaml"), "--rules", "-r",
+        help="Path to rules YAML file",
+    ),
+    config: Path = typer.Option(_DEFAULT_CONFIG, "--config", "-c"),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Dry-run: validate rule syntax and report current metric values."""
+    _setup_logging(verbose)
+    from mimir.domain.guardrails_config import load_rules
+
+    # Validate rules
+    try:
+        rule_list = load_rules(rules)
+    except Exception as exc:
+        console.print(f"[red bold]Rule loading error:[/] {exc}")
+        raise typer.Exit(1) from exc
+
+    console.print(f"[green]Loaded {len(rule_list)} rules from {rules}[/]")
+    for r in rule_list:
+        console.print(f"  [{r.severity.value}] {r.id}: {r.description}")
+
+    # Optionally check against graph
+    try:
+        cfg, ws_name = _load_config(config, workspace)
+    except Exception:
+        console.print("\n[yellow]No config found — skipping graph analysis.[/]")
+        return
+
+    from mimir.container import Container
+    container = Container(cfg)
+    graph = container.load_graph()
+    console.print(f"\n[bold]Graph:[/] {graph.node_count} nodes, {graph.edge_count} edges")
+    console.print("[green]Rules syntax OK. Ready for guardrail checks.[/]")
+
+
+# ------------------------------------------------------------------
 # index
 # ------------------------------------------------------------------
 
