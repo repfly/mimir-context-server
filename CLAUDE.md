@@ -68,7 +68,7 @@ Infra (concrete implementations: tree-sitter, sentence-transformers/jina, SQLite
 
 Primary config: `mimir.toml` (TOML). Key sections: `[[repos]]`, `[indexing]`, `[embeddings]`, `[retrieval]`, `[temporal]`, `[session]`, `[vector_db]`, `[llm]`.
 
-Self-referential config for development: `mimir-self.toml`.
+`mimir.toml` indexes the Mimir source itself (used for both development and CI).
 
 Guardrails config: `mimir-rules.yaml` (architectural rules) and `mimir-agent-policy.yaml` (agent scope restrictions). Both use YAML format.
 
