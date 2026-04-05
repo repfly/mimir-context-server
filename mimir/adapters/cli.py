@@ -204,11 +204,19 @@ def guardrail_check(
         "text", "--output", "-o",
         help="Output format: text, json, github-pr-comment",
     ),
+    report_file: Optional[Path] = typer.Option(
+        None, "--report-file",
+        help="Write the formatted report to a file (in addition to stdout)",
+    ),
     config: Path = typer.Option(_DEFAULT_CONFIG, "--config", "-c"),
     workspace: Optional[str] = typer.Option(None, "--workspace", "-w"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ) -> None:
-    """Validate a diff against architectural rules."""
+    """Validate a diff against architectural rules.
+
+    Exit codes: 0 = passed (or warnings only), 1 = violations found.
+    Use --report-file to write the report to a file for CI consumption.
+    """
     _setup_logging(verbose)
     from mimir.domain.guardrails_config import load_rules
     from mimir.services.guardrail_report import GuardrailReporter
@@ -253,11 +261,19 @@ def guardrail_check(
     # Format output
     reporter = GuardrailReporter()
     if output == "json":
-        console.print_json(json.dumps(result.to_dict(), indent=2))
+        formatted = json.dumps(result.to_dict(), indent=2)
+        console.print_json(formatted)
     elif output == "github-pr-comment":
-        console.print(reporter.format_github_pr_comment(result))
+        formatted = reporter.format_github_pr_comment(result)
+        console.print(formatted)
     else:
-        console.print(reporter.format_text(result))
+        formatted = reporter.format_text(result)
+        console.print(formatted)
+
+    # Write report file if requested
+    if report_file:
+        report_file.parent.mkdir(parents=True, exist_ok=True)
+        report_file.write_text(formatted + "\n", encoding="utf-8")
 
     if not result.passed:
         raise typer.Exit(1)

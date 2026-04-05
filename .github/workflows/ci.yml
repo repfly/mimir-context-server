@@ -32,6 +32,9 @@ jobs:
     name: Architectural Guardrails
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,11 +50,24 @@ jobs:
       - name: Build code graph
         run: mimir index
 
-      - name: Validate rules syntax
-        run: mimir guardrail test --rules mimir-rules.yaml
-
       - name: Run guardrail check
+        id: guardrails
         run: |
           git diff origin/${{ github.base_ref }}...HEAD | \
-            mimir guardrail check --diff - --rules mimir-rules.yaml --output github-pr-comment \
-            >> $GITHUB_STEP_SUMMARY
+            mimir guardrail check --diff - \
+              --rules mimir-rules.yaml \
+              --output github-pr-comment \
+              --report-file guardrail-report.md \
+            || echo "passed=false" >> $GITHUB_ENV
+          cat guardrail-report.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Comment on PR
+        if: always() && hashFiles('guardrail-report.md') != ''
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: mimir-guardrails
+          path: guardrail-report.md
+
+      - name: Fail if violations
+        if: env.passed == 'false'
+        run: exit 1
