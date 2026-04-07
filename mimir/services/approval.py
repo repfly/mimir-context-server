@@ -36,6 +36,7 @@ class ApprovalService:
         *,
         rule_ids: list[str],
         diff_text: str,
+        branch: str,
         requested_by: str,
         affected_files: list[str] | None = None,
         ttl_days: int = 7,
@@ -49,6 +50,7 @@ class ApprovalService:
             id=request_id,
             rule_ids=tuple(rule_ids),
             diff_hash=self.compute_diff_hash(diff_text),
+            branch=branch,
             status=ApprovalStatus.PENDING,
             requested_by=requested_by,
             requested_at=now.isoformat(),
@@ -85,6 +87,7 @@ class ApprovalService:
             id=req.id,
             rule_ids=req.rule_ids,
             diff_hash=req.diff_hash,
+            branch=req.branch,
             status=ApprovalStatus.APPROVED,
             requested_by=req.requested_by,
             requested_at=req.requested_at,
@@ -112,6 +115,7 @@ class ApprovalService:
             id=req.id,
             rule_ids=req.rule_ids,
             diff_hash=req.diff_hash,
+            branch=req.branch,
             status=ApprovalStatus.REVOKED,
             requested_by=req.requested_by,
             requested_at=req.requested_at,
@@ -153,6 +157,7 @@ class ApprovalService:
                                 id=req.id,
                                 rule_ids=req.rule_ids,
                                 diff_hash=req.diff_hash,
+                                branch=req.branch,
                                 status=ApprovalStatus.EXPIRED,
                                 requested_by=req.requested_by,
                                 requested_at=req.requested_at,
@@ -171,15 +176,15 @@ class ApprovalService:
         return results
 
     def find_matching(
-        self, *, rule_ids: set[str], diff_hash: str,
+        self, *, rule_ids: set[str], branch: str,
     ) -> list[ApprovalRequest]:
-        """Return approved, non-expired requests matching any of *rule_ids* and *diff_hash*."""
+        """Return approved, non-expired requests matching any of *rule_ids* on *branch*."""
         now = datetime.now(timezone.utc)
         matches: list[ApprovalRequest] = []
 
         for req in self.list_all():
             for rid in rule_ids:
-                if req.is_valid_for(rid, diff_hash, now):
+                if req.is_valid_for(rid, branch, now):
                     matches.append(req)
                     break
 
@@ -243,6 +248,7 @@ class ApprovalService:
             id=raw["id"],
             rule_ids=tuple(raw.get("rule_ids", [])),
             diff_hash=raw.get("diff_hash", ""),
+            branch=raw.get("branch", ""),
             status=ApprovalStatus(raw.get("status", "pending")),
             requested_by=raw.get("requested_by", ""),
             requested_at=raw.get("requested_at", ""),

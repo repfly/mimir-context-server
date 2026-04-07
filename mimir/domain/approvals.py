@@ -44,6 +44,7 @@ class ApprovalRequest:
     id: str
     rule_ids: tuple[str, ...]
     diff_hash: str
+    branch: str
     status: ApprovalStatus
     requested_by: str
     requested_at: str  # ISO-8601 UTC
@@ -61,13 +62,13 @@ class ApprovalRequest:
         if not self.rule_ids:
             raise ValueError("ApprovalRequest must reference at least one rule")
 
-    def is_valid_for(self, rule_id: str, diff_hash: str, now: datetime | None = None) -> bool:
-        """Return True if this approval covers *rule_id* for *diff_hash* and has not expired."""
+    def is_valid_for(self, rule_id: str, branch: str, now: datetime | None = None) -> bool:
+        """Return True if this approval covers *rule_id* on *branch* and has not expired."""
         if self.status != ApprovalStatus.APPROVED:
             return False
         if rule_id not in self.rule_ids:
             return False
-        if self.diff_hash != diff_hash:
+        if self.branch != branch:
             return False
         if self.expires_at:
             now = now or datetime.now(timezone.utc)
@@ -84,6 +85,7 @@ class ApprovalRequest:
             "id": self.id,
             "rule_ids": list(self.rule_ids),
             "diff_hash": self.diff_hash,
+            "branch": self.branch,
             "status": self.status.value,
             "requested_by": self.requested_by,
             "requested_at": self.requested_at,

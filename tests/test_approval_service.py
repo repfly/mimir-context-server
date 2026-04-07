@@ -36,6 +36,7 @@ class TestCreateRequest:
         req = svc.create_request(
             rule_ids=["protect-container"],
             diff_text="diff content",
+            branch="feature/guardrail",
             requested_by="alice",
             affected_files=["container.py"],
         )
@@ -48,14 +49,14 @@ class TestCreateRequest:
     def test_creates_dir_if_missing(self, tmp_path: Path):
         svc = ApprovalService(tmp_path / "nested" / "approvals")
         req = svc.create_request(
-            rule_ids=["r1"], diff_text="diff", requested_by="bob",
+            rule_ids=["r1"], diff_text="diff", branch="feat/x", requested_by="bob",
         )
         assert (tmp_path / "nested" / "approvals" / f"{req.id}.yaml").exists()
 
     def test_custom_ttl(self, tmp_path: Path):
         svc = ApprovalService(tmp_path)
         req = svc.create_request(
-            rule_ids=["r1"], diff_text="diff", requested_by="alice", ttl_days=14,
+            rule_ids=["r1"], diff_text="diff", branch="feat/x", requested_by="alice", ttl_days=14,
         )
         assert req.expires_at is not None
         expiry = datetime.fromisoformat(req.expires_at)
@@ -67,7 +68,7 @@ class TestApprove:
     def test_approve_pending(self, tmp_path: Path):
         svc = ApprovalService(tmp_path)
         req = svc.create_request(
-            rule_ids=["r1"], diff_text="diff", requested_by="alice",
+            rule_ids=["r1"], diff_text="diff", branch="feat/x", requested_by="alice",
         )
         approved = svc.approve(req.id, approved_by="bob", reason="Looks good")
         assert approved.status == ApprovalStatus.APPROVED
@@ -77,7 +78,7 @@ class TestApprove:
     def test_approve_already_approved_raises(self, tmp_path: Path):
         svc = ApprovalService(tmp_path)
         req = svc.create_request(
-            rule_ids=["r1"], diff_text="diff", requested_by="alice",
+            rule_ids=["r1"], diff_text="diff", branch="feat/x", requested_by="alice",
         )
         svc.approve(req.id, approved_by="bob", reason="ok")
         with pytest.raises(GuardrailError, match="Cannot approve"):
@@ -86,7 +87,7 @@ class TestApprove:
     def test_approve_unauthorized_raises(self, tmp_path: Path):
         svc = ApprovalService(tmp_path)
         req = svc.create_request(
-            rule_ids=["r1"], diff_text="diff", requested_by="alice",
+            rule_ids=["r1"], diff_text="diff", branch="feat/x", requested_by="alice",
         )
         with pytest.raises(GuardrailError, match="not in the authorized"):
             svc.approve(
@@ -97,7 +98,7 @@ class TestApprove:
     def test_approve_with_allowed_list(self, tmp_path: Path):
         svc = ApprovalService(tmp_path)
         req = svc.create_request(
-            rule_ids=["r1"], diff_text="diff", requested_by="alice",
+            rule_ids=["r1"], diff_text="diff", branch="feat/x", requested_by="alice",
         )
         approved = svc.approve(
             req.id, approved_by="bob", reason="ok",
@@ -110,7 +111,7 @@ class TestRevoke:
     def test_revoke_approved(self, tmp_path: Path):
         svc = ApprovalService(tmp_path)
         req = svc.create_request(
-            rule_ids=["r1"], diff_text="diff", requested_by="alice",
+            rule_ids=["r1"], diff_text="diff", branch="feat/x", requested_by="alice",
         )
         svc.approve(req.id, approved_by="bob", reason="ok")
         revoked = svc.revoke(req.id, revoked_by="charlie")
@@ -120,7 +121,7 @@ class TestRevoke:
     def test_revoke_already_revoked_raises(self, tmp_path: Path):
         svc = ApprovalService(tmp_path)
         req = svc.create_request(
-            rule_ids=["r1"], diff_text="diff", requested_by="alice",
+            rule_ids=["r1"], diff_text="diff", branch="feat/x", requested_by="alice",
         )
         svc.revoke(req.id, revoked_by="bob")
         with pytest.raises(GuardrailError, match="Cannot revoke"):
@@ -139,8 +140,8 @@ class TestLoadAndList:
 
     def test_list_all(self, tmp_path: Path):
         svc = ApprovalService(tmp_path)
-        svc.create_request(rule_ids=["r1"], diff_text="d1", requested_by="a")
-        svc.create_request(rule_ids=["r2"], diff_text="d2", requested_by="b")
+        svc.create_request(rule_ids=["r1"], diff_text="d1", branch="feat/x", requested_by="a")
+        svc.create_request(rule_ids=["r2"], diff_text="d2", branch="feat/x", requested_by="b")
         assert len(svc.list_all()) == 2
 
 
@@ -148,32 +149,30 @@ class TestFindMatching:
     def test_finds_matching_approval(self, tmp_path: Path):
         svc = ApprovalService(tmp_path)
         req = svc.create_request(
-            rule_ids=["r1"], diff_text="the diff", requested_by="alice",
+            rule_ids=["r1"], diff_text="the diff", branch="feat/x", requested_by="alice",
         )
         svc.approve(req.id, approved_by="bob", reason="ok")
 
-        diff_hash = ApprovalService.compute_diff_hash("the diff")
-        matches = svc.find_matching(rule_ids={"r1"}, diff_hash=diff_hash)
+        matches = svc.find_matching(rule_ids={"r1"}, branch="feat/x")
         assert len(matches) == 1
         assert matches[0].id == req.id
 
-    def test_no_match_wrong_hash(self, tmp_path: Path):
+    def test_no_match_wrong_branch(self, tmp_path: Path):
         svc = ApprovalService(tmp_path)
         req = svc.create_request(
-            rule_ids=["r1"], diff_text="the diff", requested_by="alice",
+            rule_ids=["r1"], diff_text="the diff", branch="feat/x", requested_by="alice",
         )
         svc.approve(req.id, approved_by="bob", reason="ok")
 
-        matches = svc.find_matching(rule_ids={"r1"}, diff_hash="sha256:wrong")
+        matches = svc.find_matching(rule_ids={"r1"}, branch="other-branch")
         assert len(matches) == 0
 
     def test_no_match_pending(self, tmp_path: Path):
         svc = ApprovalService(tmp_path)
         svc.create_request(
-            rule_ids=["r1"], diff_text="the diff", requested_by="alice",
+            rule_ids=["r1"], diff_text="the diff", branch="feat/x", requested_by="alice",
         )
-        diff_hash = ApprovalService.compute_diff_hash("the diff")
-        matches = svc.find_matching(rule_ids={"r1"}, diff_hash=diff_hash)
+        matches = svc.find_matching(rule_ids={"r1"}, branch="feat/x")
         assert len(matches) == 0  # pending, not approved
 
 
@@ -181,7 +180,7 @@ class TestCleanExpired:
     def test_clean_revoked(self, tmp_path: Path):
         svc = ApprovalService(tmp_path)
         req = svc.create_request(
-            rule_ids=["r1"], diff_text="diff", requested_by="alice",
+            rule_ids=["r1"], diff_text="diff", branch="feat/x", requested_by="alice",
         )
         svc.revoke(req.id, revoked_by="bob")
 
@@ -192,7 +191,7 @@ class TestCleanExpired:
     def test_clean_dry_run(self, tmp_path: Path):
         svc = ApprovalService(tmp_path)
         req = svc.create_request(
-            rule_ids=["r1"], diff_text="diff", requested_by="alice",
+            rule_ids=["r1"], diff_text="diff", branch="feat/x", requested_by="alice",
         )
         svc.revoke(req.id, revoked_by="bob")
 

@@ -21,6 +21,8 @@ jobs:
         run: mimir index
 
       - name: Run guardrails
+        env:
+          MIMIR_FAIL_ON_PENDING: ${{ vars.MIMIR_FAIL_ON_PENDING || 'false' }}
         run: |
           EXIT_CODE=0
           git diff origin/${{ github.base_ref }}...HEAD | \
@@ -33,6 +35,8 @@ jobs:
             echo "::error::Guardrail errors found"
             exit 1
           elif [ "$EXIT_CODE" = "2" ]; then
-            echo "::warning::Guardrail BLOCK violations pending approval"
-            exit 1
+            echo "::warning::Guardrail BLOCK violations are pending human approval"
+            if [ "$MIMIR_FAIL_ON_PENDING" = "true" ]; then
+              exit 1
+            fi
           fi

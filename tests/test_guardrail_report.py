@@ -249,8 +249,12 @@ class TestFormatTextApprovals:
 
     def test_pending_instructions_shown(self):
         reporter = GuardrailReporter()
-        text = reporter.format_text(_approval_result())
-        assert "mimir guardrail request" in text
+        text = reporter.format_text(
+            _approval_result(), pending_rule_ids=("protect-ports",),
+        )
+        assert "mimir guardrail request --rules protect-ports" in text
+        assert "--base main" not in text
+        assert "mimir guardrail approve" in text
 
 
 class TestFormatGithubPrCommentApprovals:
@@ -267,8 +271,12 @@ class TestFormatGithubPrCommentApprovals:
 
     def test_approval_instructions(self):
         reporter = GuardrailReporter()
-        md = reporter.format_github_pr_comment(_approval_result())
+        md = reporter.format_github_pr_comment(
+            _approval_result(), pending_rule_ids=("protect-ports",),
+        )
         assert "Approval Required" in md
+        assert "mimir guardrail request --rules protect-ports" in md
+        assert "--base main" not in md
         assert "mimir guardrail approve" in md
 
 

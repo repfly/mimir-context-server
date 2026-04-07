@@ -541,11 +541,12 @@ def _make_result(violations: tuple[Violation, ...], passed: bool = False) -> Gua
     )
 
 
-def _make_approval(rule_ids, diff_hash, status=ApprovalStatus.APPROVED, expires_at="2099-01-01T00:00:00+00:00"):
+def _make_approval(rule_ids, branch="feat/x", status=ApprovalStatus.APPROVED, expires_at="2099-01-01T00:00:00+00:00"):
     return ApprovalRequest(
         id="apr-test1234",
         rule_ids=tuple(rule_ids),
-        diff_hash=diff_hash,
+        diff_hash="sha256:audit-only",
+        branch=branch,
         status=status,
         requested_by="alice",
         requested_at="2026-04-06T10:00:00+00:00",
@@ -562,9 +563,9 @@ class TestApplyApprovals:
             Violation(rule_id="r1", rule_description="d", severity=Severity.BLOCK, message="m"),
         )
         result = _make_result(violations)
-        approval = _make_approval(["r1"], "sha256:abc")
+        approval = _make_approval(["r1"], "feat/x")
 
-        new_result = apply_approvals(result, [approval], "sha256:abc")
+        new_result = apply_approvals(result, [approval], "feat/x")
 
         assert new_result.passed is True
         assert new_result.violations[0].approval_status == "approved"
@@ -576,20 +577,20 @@ class TestApplyApprovals:
         )
         result = _make_result(violations)
 
-        new_result = apply_approvals(result, [], "sha256:abc")
+        new_result = apply_approvals(result, [], "feat/x")
 
         assert new_result.passed is False
         assert new_result.violations[0].approval_status == "pending"
         assert "r1" in new_result.pending_approvals
 
-    def test_wrong_hash_does_not_match(self):
+    def test_wrong_branch_does_not_match(self):
         violations = (
             Violation(rule_id="r1", rule_description="d", severity=Severity.BLOCK, message="m"),
         )
         result = _make_result(violations)
-        approval = _make_approval(["r1"], "sha256:different")
+        approval = _make_approval(["r1"], "other-branch")
 
-        new_result = apply_approvals(result, [approval], "sha256:abc")
+        new_result = apply_approvals(result, [approval], "feat/x")
 
         assert new_result.passed is False
         assert new_result.violations[0].approval_status == "pending"
@@ -600,9 +601,9 @@ class TestApplyApprovals:
             Violation(rule_id="r2", rule_description="d", severity=Severity.BLOCK, message="m"),
         )
         result = _make_result(violations)
-        approval = _make_approval(["r2"], "sha256:abc")
+        approval = _make_approval(["r2"], "feat/x")
 
-        new_result = apply_approvals(result, [approval], "sha256:abc")
+        new_result = apply_approvals(result, [approval], "feat/x")
 
         assert new_result.passed is False
         assert new_result.violations[1].approval_status == "approved"
@@ -613,7 +614,7 @@ class TestApplyApprovals:
         )
         result = _make_result(violations, passed=True)
 
-        new_result = apply_approvals(result, [], "sha256:abc")
+        new_result = apply_approvals(result, [], "feat/x")
 
         assert new_result.passed is True
         assert new_result.violations[0].approval_status is None
@@ -623,9 +624,9 @@ class TestApplyApprovals:
             Violation(rule_id="r1", rule_description="d", severity=Severity.BLOCK, message="m"),
         )
         result = _make_result(violations)
-        approval = _make_approval(["r1"], "sha256:abc", expires_at="2020-01-01T00:00:00+00:00")
+        approval = _make_approval(["r1"], "feat/x", expires_at="2020-01-01T00:00:00+00:00")
 
-        new_result = apply_approvals(result, [approval], "sha256:abc")
+        new_result = apply_approvals(result, [approval], "feat/x")
 
         assert new_result.passed is False
         assert new_result.violations[0].approval_status == "pending"
@@ -636,9 +637,9 @@ class TestApplyApprovals:
             Violation(rule_id="r2", rule_description="d", severity=Severity.BLOCK, message="m"),
         )
         result = _make_result(violations)
-        approval = _make_approval(["r1"], "sha256:abc")
+        approval = _make_approval(["r1"], "feat/x")
 
-        new_result = apply_approvals(result, [approval], "sha256:abc")
+        new_result = apply_approvals(result, [approval], "feat/x")
 
         assert "1 block(s) approved" in new_result.summary
         assert "1 block(s) pending" in new_result.summary

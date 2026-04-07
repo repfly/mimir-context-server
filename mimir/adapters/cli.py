@@ -327,15 +327,19 @@ def guardrail_check(
     # Evaluate
     result = asyncio.run(container.guardrail.evaluate(graph, diff_text, rule_list))
 
-    # Apply approvals unless skipped
-    auto_request_id: str | None = None
-    if not no_approvals:
-        import subprocess as _sp
+    # Detect current branch for approval matching
+    try:
+        current_branch = _sp.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], text=True,
+        ).strip()
+    except Exception:
+        current_branch = ""
 
+    # Apply approvals unless skipped
+    if not no_approvals:
         approval_config = load_approval_config(rules)
         approvals_dir = Path(approval_config.approvals_dir)
         approval_svc = ApprovalService(approvals_dir)
-        diff_hash = ApprovalService.compute_diff_hash(diff_text)
 
         block_rule_ids = {
             v.rule_id for v in result.violations
@@ -343,50 +347,24 @@ def guardrail_check(
         }
         if block_rule_ids:
             matching = approval_svc.find_matching(
-                rule_ids=block_rule_ids, diff_hash=diff_hash,
+                rule_ids=block_rule_ids, branch=current_branch,
             )
-            result = apply_approvals(result, matching, diff_hash)
-
-            # Auto-create approval request for pending blocks
-            if result.has_pending_blocks:
-                try:
-                    requester = _sp.check_output(
-                        ["git", "config", "user.name"], text=True,
-                    ).strip()
-                except Exception:
-                    requester = "unknown"
-
-                affected = []
-                for line in diff_text.splitlines():
-                    if line.startswith("+++ b/"):
-                        affected.append(line[6:])
-
-                pending_ids = list(result.pending_approvals)
-                req = approval_svc.create_request(
-                    rule_ids=pending_ids,
-                    diff_text=diff_text,
-                    requested_by=requester,
-                    affected_files=affected,
-                    ttl_days=approval_config.default_ttl_days,
-                )
-                auto_request_id = req.id
+            result = apply_approvals(result, matching, current_branch)
 
     # Format output
+    pending_ids = tuple(result.pending_approvals) if result.has_pending_blocks else ()
     reporter = GuardrailReporter()
     if output == "json":
-        out_dict = result.to_dict()
-        if auto_request_id:
-            out_dict["approval_request_id"] = auto_request_id
-        formatted = json.dumps(out_dict, indent=2)
+        formatted = json.dumps(result.to_dict(), indent=2)
         console.print_json(formatted)
     elif output == "github-pr-comment":
         formatted = reporter.format_github_pr_comment(
-            result, approval_request_id=auto_request_id,
+            result, pending_rule_ids=pending_ids,
         )
         console.print(formatted)
     else:
         formatted = reporter.format_text(
-            result, approval_request_id=auto_request_id,
+            result, pending_rule_ids=pending_ids,
         )
         console.print(formatted)
 
@@ -480,6 +458,10 @@ def guardrail_request(
         "", "--diff", "-d",
         help="Path to diff file, '-' for stdin, or empty for auto-detect from git",
     ),
+    base: str = typer.Option(
+        "", "--base", "-b",
+        help="Base ref for git diff (e.g. main, origin/main). Default: auto-detect",
+    ),
     ttl: int = typer.Option(
         0, "--ttl",
         help="Approval TTL in days (0 = use default from config)",
@@ -489,10 +471,9 @@ def guardrail_request(
         help="Path to rules YAML (for approval config)",
     ),
 ) -> None:
-    """Manually create an approval request for BLOCK violations.
+    """Create an approval request for BLOCK violations.
 
-    Note: `guardrail check` auto-creates requests for pending blocks.
-    Use this command to re-create a request after code changes.
+    Run this locally, then approve and commit the approval file.
     """
     import subprocess
 
@@ -509,11 +490,19 @@ def guardrail_request(
             raise typer.Exit(1)
         diff_text = diff_path.read_text()
     else:
-        diff_text = _git_auto_diff()
+        diff_text = _git_auto_diff(base)
 
     if not diff_text.strip():
         console.print("[yellow]Empty diff — nothing to request approval for.[/]")
         raise typer.Exit(0)
+
+    # Detect current branch
+    try:
+        current_branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], text=True,
+        ).strip()
+    except Exception:
+        current_branch = ""
 
     # Resolve config
     approval_config = load_approval_config(rules_file)
@@ -540,6 +529,7 @@ def guardrail_request(
     req = svc.create_request(
         rule_ids=ids,
         diff_text=diff_text,
+        branch=current_branch,
         requested_by=requested_by,
         affected_files=affected,
         ttl_days=ttl_days,
@@ -547,13 +537,14 @@ def guardrail_request(
 
     console.print(f"[green]Created approval request:[/] {req.id}")
     console.print(f"  Rules: {', '.join(req.rule_ids)}")
-    console.print(f"  Diff hash: {req.diff_hash}")
+    console.print(f"  Branch: {req.branch}")
     console.print(f"  Expires: {req.expires_at}")
     console.print(f"  File: {approvals_dir / f'{req.id}.yaml'}")
     console.print("")
     console.print("[bold]Next steps:[/]")
-    console.print(f"  1. git add {approvals_dir / f'{req.id}.yaml'}")
-    console.print(f"  2. Ask a reviewer to run: mimir guardrail approve {req.id} --reason \"...\"")
+    console.print(f"  1. Ask a reviewer to run: mimir guardrail approve {req.id} --reason \"...\"")
+    console.print(f"  2. git add {approvals_dir / f'{req.id}.yaml'}")
+    console.print("  3. Commit and push")
 
 
 @guardrail_app.command("approve")
@@ -664,10 +655,10 @@ def guardrail_status(
     table = Table(title="Approval Requests")
     table.add_column("ID", style="bold")
     table.add_column("Rules")
+    table.add_column("Branch")
     table.add_column("Status")
     table.add_column("Requested By")
     table.add_column("Expires")
-    table.add_column("Diff Hash")
 
     status_styles = {
         "pending": "[yellow]pending[/yellow]",
@@ -680,10 +671,10 @@ def guardrail_status(
         table.add_row(
             req.id,
             ", ".join(req.rule_ids),
+            req.branch or "-",
             status_styles.get(req.status.value, req.status.value),
             req.requested_by,
             req.expires_at or "-",
-            req.diff_hash[:20] + "..." if len(req.diff_hash) > 20 else req.diff_hash,
         )
 
     console.print(table)

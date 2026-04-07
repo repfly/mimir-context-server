@@ -118,29 +118,32 @@ Per-rule overrides are supported in `file_scope_ban` configs:
 ### Workflow
 
 ```bash
-# 1. Developer runs check — BLOCK violations auto-create an approval request
-git diff | mimir guardrail check --diff -
+# 1. CI or local check finds BLOCK violations
+mimir guardrail check --base main
 # → exit code 2 (pending approval)
-# → Auto-created approval request: apr-a1b2c3d4
+# → Reports: rule IDs and instructions
 
-# 2. Commit the request file
-git add .mimir/approvals/apr-a1b2c3d4.yaml
+# 2. Developer creates approval request locally
+mimir guardrail request --rules protect-auth
 
 # 3. Reviewer approves
 mimir guardrail approve apr-a1b2c3d4 --reason "Reviewed auth changes"
-git add .mimir/approvals/apr-a1b2c3d4.yaml
 
-# 4. Re-run check — now passes
-git diff | mimir guardrail check --diff -     # exits with code 0
+# 4. Commit and push the approval file
+git add .mimir/approvals/apr-a1b2c3d4.yaml
+git commit -m "Add guardrail approval for auth changes"
+git push
+
+# 5. CI re-runs → approval matches → passes (exit code 0)
 ```
 
-The approval request is automatically created by `guardrail check` — no manual `request` step needed. If the diff changes after approval, the hash won't match and a new request will be auto-created on the next check.
+Approvals are matched by **rule ID + branch name** — no fragile diff-hash binding. The `diff_hash` is still stored in the YAML file for audit purposes.
 
 ### CLI Commands
 
 | Command | Description |
 |---|---|
-| `mimir guardrail request --rules <ids> --diff <path>` | Manually create an approval request (auto-created by `check`) |
+| `mimir guardrail request --rules <ids>` | Create an approval request for BLOCK violations |
 | `mimir guardrail approve <id> --reason "..."` | Grant approval |
 | `mimir guardrail revoke <id>` | Revoke an approval |
 | `mimir guardrail status` | List all approval requests |
@@ -148,9 +151,10 @@ The approval request is automatically created by `guardrail check` — no manual
 
 ### Key Properties
 
-- **Diff-hash binding**: Approvals are tied to the exact diff content (SHA-256). Any code change after approval invalidates it.
+- **Branch-scoped matching**: Approvals are matched by rule ID + branch name, making them stable across environments.
 - **TTL expiry**: Approvals expire after a configurable number of days (default 7).
 - **Exit codes**: `0` = passed, `1` = errors, `2` = blocks pending approval.
+- **CI behavior**: Pending approvals emit a warning but don't fail CI by default. Set `MIMIR_FAIL_ON_PENDING=true` to enforce.
 - **`--no-approvals` flag**: Skip approval matching on `guardrail check` to see raw violations.
 
 ## Agent Policy (`mimir-agent-policy.yaml`)

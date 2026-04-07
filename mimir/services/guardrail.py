@@ -433,7 +433,7 @@ class GuardrailService:
 def apply_approvals(
     result: GuardrailResult,
     approvals: list[ApprovalRequest],
-    diff_hash: str,
+    branch: str,
 ) -> GuardrailResult:
     """Annotate BLOCK violations with approval status and return a new result.
 
@@ -452,9 +452,9 @@ def apply_approvals(
             new_violations.append(v)
             continue
 
-        # Check if any approval covers this violation
+        # Check if any approval covers this violation on this branch
         matched = any(
-            a.is_valid_for(v.rule_id, diff_hash, now)
+            a.is_valid_for(v.rule_id, branch, now)
             for a in approvals
         )
 

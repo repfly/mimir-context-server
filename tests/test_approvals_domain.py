@@ -24,6 +24,7 @@ class TestApprovalRequest:
             id="apr-12345678",
             rule_ids=("protect-container",),
             diff_hash="sha256:abc123",
+            branch="feature/guardrail",
             status=ApprovalStatus.PENDING,
             requested_by="alice",
             requested_at="2026-04-06T10:00:00+00:00",
@@ -55,6 +56,7 @@ class TestApprovalRequest:
         d = req.to_dict()
         assert d["id"] == "apr-12345678"
         assert d["rule_ids"] == ["protect-container"]
+        assert d["branch"] == "feature/guardrail"
         assert d["affected_files"] == ["a.py"]
         assert d["status"] == "pending"
 
@@ -62,39 +64,39 @@ class TestApprovalRequest:
         now = datetime(2026, 4, 6, 12, 0, tzinfo=timezone.utc)
         req = self._make(
             status=ApprovalStatus.APPROVED,
-            diff_hash="sha256:abc",
+            branch="feature/guardrail",
             expires_at="2026-04-13T10:00:00+00:00",
         )
-        assert req.is_valid_for("protect-container", "sha256:abc", now) is True
+        assert req.is_valid_for("protect-container", "feature/guardrail", now) is True
 
     def test_is_valid_for_wrong_rule(self):
-        req = self._make(status=ApprovalStatus.APPROVED, diff_hash="sha256:abc")
-        assert req.is_valid_for("other-rule", "sha256:abc") is False
+        req = self._make(status=ApprovalStatus.APPROVED, branch="feature/guardrail")
+        assert req.is_valid_for("other-rule", "feature/guardrail") is False
 
-    def test_is_valid_for_wrong_hash(self):
-        req = self._make(status=ApprovalStatus.APPROVED, diff_hash="sha256:abc")
-        assert req.is_valid_for("protect-container", "sha256:different") is False
+    def test_is_valid_for_wrong_branch(self):
+        req = self._make(status=ApprovalStatus.APPROVED, branch="feature/guardrail")
+        assert req.is_valid_for("protect-container", "other-branch") is False
 
     def test_is_valid_for_pending_status(self):
-        req = self._make(status=ApprovalStatus.PENDING, diff_hash="sha256:abc")
-        assert req.is_valid_for("protect-container", "sha256:abc") is False
+        req = self._make(status=ApprovalStatus.PENDING, branch="feature/guardrail")
+        assert req.is_valid_for("protect-container", "feature/guardrail") is False
 
     def test_is_valid_for_expired(self):
         now = datetime(2026, 4, 20, 12, 0, tzinfo=timezone.utc)
         req = self._make(
             status=ApprovalStatus.APPROVED,
-            diff_hash="sha256:abc",
+            branch="feature/guardrail",
             expires_at="2026-04-13T10:00:00+00:00",
         )
-        assert req.is_valid_for("protect-container", "sha256:abc", now) is False
+        assert req.is_valid_for("protect-container", "feature/guardrail", now) is False
 
     def test_is_valid_for_no_expiry(self):
         req = self._make(
             status=ApprovalStatus.APPROVED,
-            diff_hash="sha256:abc",
+            branch="feature/guardrail",
             expires_at=None,
         )
-        assert req.is_valid_for("protect-container", "sha256:abc") is True
+        assert req.is_valid_for("protect-container", "feature/guardrail") is True
 
 
 class TestApprovalConfig:

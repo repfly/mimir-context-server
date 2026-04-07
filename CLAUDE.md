@@ -31,11 +31,11 @@ mimir guardrail check --diff - --rules mimir-rules.yaml  # Validate diff (stdin)
 mimir guardrail test    # Dry-run: validate rule syntax
 
 # Guardrail Approvals (exit code 2 = pending approval)
-mimir guardrail request --rules <rule-ids> --diff -  # Create approval request
-mimir guardrail approve <request-id> --reason "..."  # Grant approval
-mimir guardrail revoke <request-id>                  # Revoke approval
-mimir guardrail status                               # List approvals
-mimir guardrail clean                                # Remove expired approvals
+mimir guardrail request --rules <rule-ids>              # Create approval request
+mimir guardrail approve <request-id> --reason "..."     # Grant approval
+mimir guardrail revoke <request-id>                     # Revoke approval
+mimir guardrail status                                  # List approvals
+mimir guardrail clean                                   # Remove expired approvals
 ```
 
 ## Architecture
