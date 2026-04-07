@@ -336,6 +336,7 @@ def guardrail_check(
         current_branch = ""
 
     # Apply approvals unless skipped
+    auto_request_id: str | None = None
     if not no_approvals:
         approval_config = load_approval_config(rules)
         approvals_dir = Path(approval_config.approvals_dir)
@@ -351,20 +352,50 @@ def guardrail_check(
             )
             result = apply_approvals(result, matching, current_branch)
 
+            # Auto-create approval request for pending blocks
+            if result.has_pending_blocks:
+                try:
+                    requester = _sp.check_output(
+                        ["git", "config", "user.name"], text=True,
+                    ).strip()
+                except Exception:
+                    requester = "unknown"
+
+                affected = [
+                    line[6:] for line in diff_text.splitlines()
+                    if line.startswith("+++ b/")
+                ]
+
+                pending_ids_list = list(result.pending_approvals)
+                req = approval_svc.create_request(
+                    rule_ids=pending_ids_list,
+                    diff_text=diff_text,
+                    branch=current_branch,
+                    requested_by=requester,
+                    affected_files=affected,
+                    ttl_days=approval_config.default_ttl_days,
+                )
+                auto_request_id = req.id
+
     # Format output
     pending_ids = tuple(result.pending_approvals) if result.has_pending_blocks else ()
     reporter = GuardrailReporter()
     if output == "json":
-        formatted = json.dumps(result.to_dict(), indent=2)
+        out_dict = result.to_dict()
+        if auto_request_id:
+            out_dict["approval_request_id"] = auto_request_id
+        formatted = json.dumps(out_dict, indent=2)
         console.print_json(formatted)
     elif output == "github-pr-comment":
         formatted = reporter.format_github_pr_comment(
             result, pending_rule_ids=pending_ids,
+            approval_request_id=auto_request_id,
         )
         console.print(formatted)
     else:
         formatted = reporter.format_text(
             result, pending_rule_ids=pending_ids,
+            approval_request_id=auto_request_id,
         )
         console.print(formatted)
 

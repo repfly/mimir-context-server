@@ -247,13 +247,22 @@ class TestFormatTextApprovals:
         assert "BLOCK (approved)" in text
         assert "BLOCK (pending approval)" in text
 
-    def test_pending_instructions_shown(self):
+    def test_pending_instructions_with_auto_request(self):
+        reporter = GuardrailReporter()
+        text = reporter.format_text(
+            _approval_result(), pending_rule_ids=("protect-ports",),
+            approval_request_id="apr-abc12345",
+        )
+        assert "apr-abc12345" in text
+        assert "mimir guardrail approve apr-abc12345" in text
+        assert "git add .mimir/approvals/" in text
+
+    def test_pending_instructions_without_request(self):
         reporter = GuardrailReporter()
         text = reporter.format_text(
             _approval_result(), pending_rule_ids=("protect-ports",),
         )
         assert "mimir guardrail request --rules protect-ports" in text
-        assert "--base main" not in text
         assert "mimir guardrail approve" in text
 
 
@@ -269,14 +278,23 @@ class TestFormatGithubPrCommentApprovals:
         assert "block (approved)" in md
         assert "block (pending)" in md
 
-    def test_approval_instructions(self):
+    def test_approval_instructions_with_auto_request(self):
+        reporter = GuardrailReporter()
+        md = reporter.format_github_pr_comment(
+            _approval_result(), pending_rule_ids=("protect-ports",),
+            approval_request_id="apr-abc12345",
+        )
+        assert "Approval Required" in md
+        assert "apr-abc12345" in md
+        assert "mimir guardrail approve apr-abc12345" in md
+
+    def test_approval_instructions_without_request(self):
         reporter = GuardrailReporter()
         md = reporter.format_github_pr_comment(
             _approval_result(), pending_rule_ids=("protect-ports",),
         )
         assert "Approval Required" in md
         assert "mimir guardrail request --rules protect-ports" in md
-        assert "--base main" not in md
         assert "mimir guardrail approve" in md
 
 

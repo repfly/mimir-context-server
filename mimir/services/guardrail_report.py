@@ -18,7 +18,9 @@ class GuardrailReporter:
     """Formats GuardrailResult for different output targets."""
 
     def format_text(
-        self, result: GuardrailResult, *, pending_rule_ids: tuple[str, ...] = (),
+        self, result: GuardrailResult, *,
+        pending_rule_ids: tuple[str, ...] = (),
+        approval_request_id: str | None = None,
     ) -> str:
         """Human-readable terminal output with rich markup."""
         parts: list[str] = []
@@ -53,11 +55,20 @@ class GuardrailReporter:
                     parts.append(f"    Fix: {v.suggested_fix}")
 
         if pending_rule_ids:
-            rule_csv = ",".join(pending_rule_ids)
             parts.append("")
-            parts.append("[yellow]To resolve pending blocks:[/yellow]")
-            parts.append(f"  mimir guardrail request --rules {rule_csv}")
-            parts.append("  mimir guardrail approve <request-id> --reason \"...\"")
+            if approval_request_id:
+                parts.append(
+                    f"[yellow]Approval request created:[/yellow] {approval_request_id}"
+                )
+                parts.append("[yellow]To approve:[/yellow]")
+                parts.append(
+                    f"  mimir guardrail approve {approval_request_id} --reason \"...\""
+                )
+            else:
+                rule_csv = ",".join(pending_rule_ids)
+                parts.append("[yellow]To resolve pending blocks:[/yellow]")
+                parts.append(f"  mimir guardrail request --rules {rule_csv}")
+                parts.append("  mimir guardrail approve <request-id> --reason \"...\"")
             parts.append("  git add .mimir/approvals/ && git commit && git push")
 
         return "\n".join(parts)
@@ -67,7 +78,9 @@ class GuardrailReporter:
         return result.to_dict()
 
     def format_github_pr_comment(
-        self, result: GuardrailResult, *, pending_rule_ids: tuple[str, ...] = (),
+        self, result: GuardrailResult, *,
+        pending_rule_ids: tuple[str, ...] = (),
+        approval_request_id: str | None = None,
     ) -> str:
         """Markdown formatted for GitHub PR comment."""
         parts: list[str] = []
@@ -121,14 +134,24 @@ class GuardrailReporter:
 
             # Approval instructions for pending blocks
             if pending_rule_ids:
-                rule_csv = ",".join(pending_rule_ids)
                 parts.append("")
                 parts.append("### Approval Required")
                 parts.append("")
-                parts.append("To approve these changes, run locally:")
-                parts.append("```bash")
-                parts.append(f"mimir guardrail request --rules {rule_csv}")
-                parts.append("mimir guardrail approve <request-id> --reason \"...\"")
+                if approval_request_id:
+                    parts.append(
+                        f"Approval request `{approval_request_id}` was auto-created. "
+                        "Run locally to approve:"
+                    )
+                    parts.append("```bash")
+                    parts.append(
+                        f"mimir guardrail approve {approval_request_id} --reason \"...\""
+                    )
+                else:
+                    rule_csv = ",".join(pending_rule_ids)
+                    parts.append("To approve these changes, run locally:")
+                    parts.append("```bash")
+                    parts.append(f"mimir guardrail request --rules {rule_csv}")
+                    parts.append("mimir guardrail approve <request-id> --reason \"...\"")
                 parts.append("git add .mimir/approvals/ && git commit && git push")
                 parts.append("```")
         else:
