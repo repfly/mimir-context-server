@@ -83,7 +83,7 @@ Guardrails config: `mimir-rules.yaml` (architectural rules) and `mimir-agent-pol
 
 ## Storage
 
-Default location: `.mimir/` — contains `graph.db` (SQLite), `sessions.db`, and optionally `chroma/` for persistent vector store.
+Default location: `.mimir/`. Tracked in git: `graph.db` (code graph) and `approvals/` (guardrail approvals). Ignored: `sessions.db` (personal), `models/` (downloaded embeddings), `chroma/` (derived). Run `mimir index` and commit `graph.db` after significant code changes.
 
 ## Docker
 

@@ -20,9 +20,12 @@ build/
 dist/
 *.egg-info/
 
-# App data
-.mimir/*
-!.mimir/approvals/
+# Mimir — personal & derived data (graph.db + approvals/ are tracked)
+.mimir/sessions.db
+.mimir/models/
+.mimir/chroma/
+.mimir/*-wal
+.mimir/*-shm
 
 # Local / personal configs
 mimir-self.toml
