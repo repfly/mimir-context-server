@@ -17,7 +17,9 @@ from mimir.domain.guardrails import GuardrailResult, Severity
 class GuardrailReporter:
     """Formats GuardrailResult for different output targets."""
 
-    def format_text(self, result: GuardrailResult) -> str:
+    def format_text(
+        self, result: GuardrailResult, *, approval_request_id: str | None = None,
+    ) -> str:
         """Human-readable terminal output with rich markup."""
         parts: list[str] = []
 
@@ -33,11 +35,16 @@ class GuardrailReporter:
         if result.violations:
             parts.append("")
             for v in result.violations:
-                severity_style = {
-                    Severity.WARNING: "[yellow]WARNING[/yellow]",
-                    Severity.ERROR: "[red]ERROR[/red]",
-                    Severity.BLOCK: "[red bold]BLOCK[/red bold]",
-                }.get(v.severity, v.severity.value)
+                if v.severity == Severity.BLOCK and v.approval_status == "approved":
+                    severity_style = "[green]BLOCK (approved)[/green]"
+                elif v.severity == Severity.BLOCK and v.approval_status == "pending":
+                    severity_style = "[yellow bold]BLOCK (pending approval)[/yellow bold]"
+                else:
+                    severity_style = {
+                        Severity.WARNING: "[yellow]WARNING[/yellow]",
+                        Severity.ERROR: "[red]ERROR[/red]",
+                        Severity.BLOCK: "[red bold]BLOCK[/red bold]",
+                    }.get(v.severity, v.severity.value)
 
                 parts.append(f"  {severity_style} [{v.rule_id}] {v.message}")
                 if v.file_path:
@@ -45,18 +52,38 @@ class GuardrailReporter:
                 if v.suggested_fix:
                     parts.append(f"    Fix: {v.suggested_fix}")
 
+        if result.has_pending_blocks:
+            parts.append("")
+            if approval_request_id:
+                parts.append(
+                    f"[yellow]Approval request auto-created:[/yellow] {approval_request_id}"
+                )
+                parts.append("[yellow]A reviewer should run:[/yellow]")
+                parts.append(
+                    f"  mimir guardrail approve {approval_request_id} --reason \"...\""
+                )
+            else:
+                parts.append("[yellow]To resolve pending blocks, run:[/yellow]")
+                parts.append("  mimir guardrail request --rules <rule-ids> --diff <path>")
+
         return "\n".join(parts)
 
     def format_json(self, result: GuardrailResult) -> dict[str, Any]:
         """Machine-readable JSON."""
         return result.to_dict()
 
-    def format_github_pr_comment(self, result: GuardrailResult) -> str:
+    def format_github_pr_comment(
+        self, result: GuardrailResult, *, approval_request_id: str | None = None,
+    ) -> str:
         """Markdown formatted for GitHub PR comment."""
         parts: list[str] = []
 
         if result.passed:
             parts.append("## ✅ Mimir Guardrail Check — Passed")
+        elif result.has_pending_blocks and not any(
+            v.severity == Severity.ERROR for v in result.violations
+        ):
+            parts.append("## ⏳ Mimir Guardrail Check — Pending Approval")
         else:
             parts.append("## ❌ Mimir Guardrail Check — Failed")
 
@@ -73,11 +100,16 @@ class GuardrailReporter:
             parts.append("|----------|------|---------|------|")
 
             for v in result.violations:
-                severity_badge = {
-                    Severity.WARNING: "⚠️ warning",
-                    Severity.ERROR: "🔴 error",
-                    Severity.BLOCK: "🚫 block",
-                }.get(v.severity, v.severity.value)
+                if v.severity == Severity.BLOCK and v.approval_status == "approved":
+                    severity_badge = "✅ block (approved)"
+                elif v.severity == Severity.BLOCK and v.approval_status == "pending":
+                    severity_badge = "⏳ block (pending)"
+                else:
+                    severity_badge = {
+                        Severity.WARNING: "⚠️ warning",
+                        Severity.ERROR: "🔴 error",
+                        Severity.BLOCK: "🚫 block",
+                    }.get(v.severity, v.severity.value)
 
                 file_str = f"`{v.file_path}`" if v.file_path else "-"
                 parts.append(
@@ -92,6 +124,29 @@ class GuardrailReporter:
                 parts.append("")
                 for v in fixes:
                     parts.append(f"- **{v.rule_id}**: {v.suggested_fix}")
+
+            # Approval instructions for pending blocks
+            pending = [v for v in result.violations
+                       if v.severity == Severity.BLOCK and v.approval_status == "pending"]
+            if pending:
+                parts.append("")
+                parts.append("### Approval Required")
+                parts.append("")
+                if approval_request_id:
+                    parts.append(
+                        f"Approval request `{approval_request_id}` was auto-created. "
+                        "An authorized reviewer should run:"
+                    )
+                    parts.append("```bash")
+                    parts.append(
+                        f"mimir guardrail approve {approval_request_id} --reason \"...\""
+                    )
+                    parts.append("```")
+                else:
+                    parts.append("To approve these changes, an authorized reviewer should run:")
+                    parts.append("```bash")
+                    parts.append("mimir guardrail approve <request-id> --reason \"...\"")
+                    parts.append("```")
         else:
             parts.append("")
             parts.append("No architectural violations detected. 🎉")
@@ -110,7 +165,7 @@ class GuardrailReporter:
         change_hash: Optional[str] = None,
     ) -> dict[str, Any]:
         """Structured audit entry for compliance (EU AI Act Article 9)."""
-        return {
+        entry: dict[str, Any] = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "change_hash": change_hash,
             "agent_id": agent_id,
@@ -120,6 +175,9 @@ class GuardrailReporter:
             "violations": [v.to_dict() for v in result.violations],
             "affected_files": list(result.change_set.affected_files),
         }
+        if result.pending_approvals:
+            entry["pending_approvals"] = list(result.pending_approvals)
+        return entry
 
 
 def append_audit_entry(data_dir: Path, entry: dict[str, Any]) -> None:

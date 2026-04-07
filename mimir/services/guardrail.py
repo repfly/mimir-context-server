@@ -6,12 +6,15 @@ Fail-closed on rule loading errors (handled by guardrails_config).
 
 from __future__ import annotations
 
+import dataclasses
 import fnmatch
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 
 import networkx as nx
 
+from mimir.domain.approvals import ApprovalRequest
 from mimir.domain.graph import CodeGraph
 from mimir.domain.guardrails import (
     ChangeSet,
@@ -421,3 +424,84 @@ class GuardrailService:
                 ))
 
         return violations
+
+
+# ------------------------------------------------------------------
+# Approval matching (pure function)
+# ------------------------------------------------------------------
+
+def apply_approvals(
+    result: GuardrailResult,
+    approvals: list[ApprovalRequest],
+    diff_hash: str,
+) -> GuardrailResult:
+    """Annotate BLOCK violations with approval status and return a new result.
+
+    - Matched BLOCK violations get ``approval_status="approved"``
+    - Unmatched BLOCK violations get ``approval_status="pending"``
+    - Non-BLOCK violations are left untouched
+    - ``passed`` is recomputed: approved blocks no longer cause failure
+    """
+    now = datetime.now(timezone.utc)
+
+    new_violations: list[Violation] = []
+    pending_rule_ids: list[str] = []
+
+    for v in result.violations:
+        if v.severity != Severity.BLOCK:
+            new_violations.append(v)
+            continue
+
+        # Check if any approval covers this violation
+        matched = any(
+            a.is_valid_for(v.rule_id, diff_hash, now)
+            for a in approvals
+        )
+
+        if matched:
+            new_violations.append(
+                dataclasses.replace(v, approval_status="approved")
+            )
+        else:
+            new_violations.append(
+                dataclasses.replace(v, approval_status="pending")
+            )
+            pending_rule_ids.append(v.rule_id)
+
+    # Recompute passed: errors still fail; only unapproved blocks fail
+    has_errors = any(v.severity == Severity.ERROR for v in new_violations)
+    has_pending = len(pending_rule_ids) > 0
+    passed = not has_errors and not has_pending
+
+    # Build summary
+    error_count = sum(1 for v in new_violations if v.severity == Severity.ERROR)
+    warning_count = sum(1 for v in new_violations if v.severity == Severity.WARNING)
+    approved_count = sum(
+        1 for v in new_violations
+        if v.severity == Severity.BLOCK and v.approval_status == "approved"
+    )
+
+    parts: list[str] = []
+    if passed:
+        parts.append("All checks passed")
+    elif has_pending and not has_errors:
+        parts.append("Pending approval")
+    else:
+        parts.append("Violations found")
+    if error_count:
+        parts.append(f"{error_count} error(s)")
+    if has_pending:
+        parts.append(f"{len(pending_rule_ids)} block(s) pending")
+    if approved_count:
+        parts.append(f"{approved_count} block(s) approved")
+    if warning_count:
+        parts.append(f"{warning_count} warning(s)")
+
+    return GuardrailResult(
+        violations=tuple(new_violations),
+        passed=passed,
+        summary=". ".join(parts),
+        change_set=result.change_set,
+        rules_evaluated=result.rules_evaluated,
+        pending_approvals=tuple(dict.fromkeys(pending_rule_ids)),  # unique, ordered
+    )

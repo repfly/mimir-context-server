@@ -6,10 +6,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from mimir.domain.approvals import ApprovalRequest, ApprovalStatus
 from mimir.domain.graph import CodeGraph
-from mimir.domain.guardrails import ChangeSet, Rule, RuleType, Severity
+from mimir.domain.guardrails import ChangeSet, GuardrailResult, Rule, RuleType, Severity, Violation
 from mimir.domain.models import Edge, EdgeKind, Node, NodeKind
-from mimir.services.guardrail import GuardrailService
+from mimir.services.guardrail import GuardrailService, apply_approvals
 from mimir.services.impact import ImpactResult, ImpactService
 from mimir.services.quality import QualityService
 
@@ -523,3 +524,121 @@ class TestCombinedEvaluation:
         assert result.passed
         assert len(result.violations) == 1
         assert result.violations[0].severity == Severity.WARNING
+
+
+# ---------------------------------------------------------------------------
+# apply_approvals tests
+# ---------------------------------------------------------------------------
+
+
+def _make_result(violations: tuple[Violation, ...], passed: bool = False) -> GuardrailResult:
+    return GuardrailResult(
+        violations=violations,
+        passed=passed,
+        summary="test",
+        change_set=ChangeSet(),
+        rules_evaluated=1,
+    )
+
+
+def _make_approval(rule_ids, diff_hash, status=ApprovalStatus.APPROVED, expires_at="2099-01-01T00:00:00+00:00"):
+    return ApprovalRequest(
+        id="apr-test1234",
+        rule_ids=tuple(rule_ids),
+        diff_hash=diff_hash,
+        status=status,
+        requested_by="alice",
+        requested_at="2026-04-06T10:00:00+00:00",
+        approved_by="bob",
+        approved_at="2026-04-06T11:00:00+00:00",
+        reason="ok",
+        expires_at=expires_at,
+    )
+
+
+class TestApplyApprovals:
+    def test_matching_approval_downgrades_block(self):
+        violations = (
+            Violation(rule_id="r1", rule_description="d", severity=Severity.BLOCK, message="m"),
+        )
+        result = _make_result(violations)
+        approval = _make_approval(["r1"], "sha256:abc")
+
+        new_result = apply_approvals(result, [approval], "sha256:abc")
+
+        assert new_result.passed is True
+        assert new_result.violations[0].approval_status == "approved"
+        assert new_result.pending_approvals == ()
+
+    def test_no_matching_approval_marks_pending(self):
+        violations = (
+            Violation(rule_id="r1", rule_description="d", severity=Severity.BLOCK, message="m"),
+        )
+        result = _make_result(violations)
+
+        new_result = apply_approvals(result, [], "sha256:abc")
+
+        assert new_result.passed is False
+        assert new_result.violations[0].approval_status == "pending"
+        assert "r1" in new_result.pending_approvals
+
+    def test_wrong_hash_does_not_match(self):
+        violations = (
+            Violation(rule_id="r1", rule_description="d", severity=Severity.BLOCK, message="m"),
+        )
+        result = _make_result(violations)
+        approval = _make_approval(["r1"], "sha256:different")
+
+        new_result = apply_approvals(result, [approval], "sha256:abc")
+
+        assert new_result.passed is False
+        assert new_result.violations[0].approval_status == "pending"
+
+    def test_errors_still_fail_even_with_approval(self):
+        violations = (
+            Violation(rule_id="r1", rule_description="d", severity=Severity.ERROR, message="m"),
+            Violation(rule_id="r2", rule_description="d", severity=Severity.BLOCK, message="m"),
+        )
+        result = _make_result(violations)
+        approval = _make_approval(["r2"], "sha256:abc")
+
+        new_result = apply_approvals(result, [approval], "sha256:abc")
+
+        assert new_result.passed is False
+        assert new_result.violations[1].approval_status == "approved"
+
+    def test_warnings_untouched(self):
+        violations = (
+            Violation(rule_id="r1", rule_description="d", severity=Severity.WARNING, message="m"),
+        )
+        result = _make_result(violations, passed=True)
+
+        new_result = apply_approvals(result, [], "sha256:abc")
+
+        assert new_result.passed is True
+        assert new_result.violations[0].approval_status is None
+
+    def test_expired_approval_does_not_match(self):
+        violations = (
+            Violation(rule_id="r1", rule_description="d", severity=Severity.BLOCK, message="m"),
+        )
+        result = _make_result(violations)
+        approval = _make_approval(["r1"], "sha256:abc", expires_at="2020-01-01T00:00:00+00:00")
+
+        new_result = apply_approvals(result, [approval], "sha256:abc")
+
+        assert new_result.passed is False
+        assert new_result.violations[0].approval_status == "pending"
+
+    def test_summary_reflects_approval_state(self):
+        violations = (
+            Violation(rule_id="r1", rule_description="d", severity=Severity.BLOCK, message="m"),
+            Violation(rule_id="r2", rule_description="d", severity=Severity.BLOCK, message="m"),
+        )
+        result = _make_result(violations)
+        approval = _make_approval(["r1"], "sha256:abc")
+
+        new_result = apply_approvals(result, [approval], "sha256:abc")
+
+        assert "1 block(s) approved" in new_result.summary
+        assert "1 block(s) pending" in new_result.summary

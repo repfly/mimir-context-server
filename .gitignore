@@ -21,7 +21,8 @@ dist/
 *.egg-info/
 
 # App data
-.mimir/
+.mimir/*
+!.mimir/approvals/
 
 # Local / personal configs
 mimir-self.toml

@@ -1,0 +1,33 @@
+id: apr-8605cdf4
+rule_ids:
+- protect-container
+diff_hash: sha256:92de31bf009fd2dd508706d9051711471b583cee630c020a7f4d8f5d25803ee7
+status: approved
+requested_by: Alper Yildirim
+requested_at: '2026-04-06T21:57:42.263845+00:00'
+affected_files:
+- .github/workflows/ci.yml
+- .gitignore
+- CLAUDE.md
+- docs/guardrails.md
+- mimir-rules.yaml
+- mimir/adapters/ci/guardrails-action.yml
+- mimir/adapters/cli.py
+- mimir/container.py
+- mimir/domain/approvals.py
+- mimir/domain/guardrails.py
+- mimir/domain/guardrails_config.py
+- mimir/services/approval.py
+- mimir/services/guardrail.py
+- mimir/services/guardrail_report.py
+- tests/test_approval_service.py
+- tests/test_approvals_domain.py
+- tests/test_guardrail_report.py
+- tests/test_guardrail_service.py
+- tests/test_guardrails_domain.py
+approved_by: Alper Yildirim
+approved_at: '2026-04-06T21:59:20.447561+00:00'
+reason: '...'
+expires_at: '2026-04-13T21:57:42.263845+00:00'
+revoked_by: null
+revoked_at: null

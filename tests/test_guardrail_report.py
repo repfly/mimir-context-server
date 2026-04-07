@@ -194,3 +194,91 @@ class TestAppendAuditEntry:
         nested = tmp_path / "deep" / "nested"
         append_audit_entry(nested, {"test": True})
         assert (nested / "guardrail_audit.jsonl").exists()
+
+
+# ---------------------------------------------------------------------------
+# Approval-aware formatting tests
+# ---------------------------------------------------------------------------
+
+
+def _approval_result() -> GuardrailResult:
+    """Result with BLOCK violations annotated with approval status."""
+    return GuardrailResult(
+        violations=(
+            Violation(
+                rule_id="protect-container",
+                rule_description="Container requires review",
+                severity=Severity.BLOCK,
+                message="File container.py matches protected pattern",
+                file_path="container.py",
+                approval_status="approved",
+            ),
+            Violation(
+                rule_id="protect-ports",
+                rule_description="Ports require review",
+                severity=Severity.BLOCK,
+                message="File ports/parser.py matches protected pattern",
+                file_path="ports/parser.py",
+                approval_status="pending",
+                suggested_fix="Request human review before modifying this file.",
+            ),
+            Violation(
+                rule_id="max-inbound",
+                rule_description="Max 20 inbound deps",
+                severity=Severity.WARNING,
+                message="afferent_coupling for User is 25",
+                file_path="src/models.py",
+            ),
+        ),
+        passed=False,
+        summary="Pending approval. 1 block(s) pending. 1 block(s) approved. 1 warning(s)",
+        change_set=ChangeSet(
+            affected_files=("container.py", "ports/parser.py", "src/models.py"),
+        ),
+        rules_evaluated=5,
+        pending_approvals=("protect-ports",),
+    )
+
+
+class TestFormatTextApprovals:
+    def test_approved_block_shown_green(self):
+        reporter = GuardrailReporter()
+        text = reporter.format_text(_approval_result())
+        assert "BLOCK (approved)" in text
+        assert "BLOCK (pending approval)" in text
+
+    def test_pending_instructions_shown(self):
+        reporter = GuardrailReporter()
+        text = reporter.format_text(_approval_result())
+        assert "mimir guardrail request" in text
+
+
+class TestFormatGithubPrCommentApprovals:
+    def test_pending_approval_header(self):
+        reporter = GuardrailReporter()
+        md = reporter.format_github_pr_comment(_approval_result())
+        assert "Pending Approval" in md
+
+    def test_approval_badges(self):
+        reporter = GuardrailReporter()
+        md = reporter.format_github_pr_comment(_approval_result())
+        assert "block (approved)" in md
+        assert "block (pending)" in md
+
+    def test_approval_instructions(self):
+        reporter = GuardrailReporter()
+        md = reporter.format_github_pr_comment(_approval_result())
+        assert "Approval Required" in md
+        assert "mimir guardrail approve" in md
+
+
+class TestFormatAuditLogApprovals:
+    def test_includes_pending_approvals(self):
+        reporter = GuardrailReporter()
+        entry = reporter.format_audit_log(_approval_result())
+        assert entry["pending_approvals"] == ["protect-ports"]
+
+    def test_no_pending_key_when_empty(self):
+        reporter = GuardrailReporter()
+        entry = reporter.format_audit_log(_passed_result())
+        assert "pending_approvals" not in entry

@@ -1,0 +1,33 @@
+id: apr-703b2093
+rule_ids:
+- protect-container
+diff_hash: sha256:ea01822d9ae2ffefe7b63e0b8662d9096b109cb0efeb7c04ba07f0cb949413fe
+status: approved
+requested_by: Alper Yildirim
+requested_at: '2026-04-07T18:50:09.094358+00:00'
+affected_files:
+- .github/workflows/ci.yml
+- .gitignore
+- CLAUDE.md
+- docs/guardrails.md
+- mimir-rules.yaml
+- mimir/adapters/ci/guardrails-action.yml
+- mimir/adapters/cli.py
+- mimir/container.py
+- mimir/domain/approvals.py
+- mimir/domain/guardrails.py
+- mimir/domain/guardrails_config.py
+- mimir/services/approval.py
+- mimir/services/guardrail.py
+- mimir/services/guardrail_report.py
+- tests/test_approval_service.py
+- tests/test_approvals_domain.py
+- tests/test_guardrail_report.py
+- tests/test_guardrail_service.py
+- tests/test_guardrails_domain.py
+approved_by: Alper Yildirim
+approved_at: '2026-04-07T18:50:20.883464+00:00'
+reason: '...'
+expires_at: '2026-04-14T18:50:09.094358+00:00'
+revoked_by: null
+revoked_at: null

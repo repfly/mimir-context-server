@@ -1,3 +1,11 @@
+# ---------------------------------------------------------------------------
+# Approval workflow configuration
+# ---------------------------------------------------------------------------
+approval_config:
+  default_ttl_days: 7
+  approvers: []              # global approver list (git user.name values)
+  approvals_dir: ".mimir/approvals"
+
 rules:
   # ===================================================================
   # HEXAGONAL LAYER ENFORCEMENT

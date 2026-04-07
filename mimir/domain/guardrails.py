@@ -86,9 +86,10 @@ class Violation:
     evidence: tuple[str, ...] = ()
     file_path: str | None = None
     suggested_fix: str | None = None
+    approval_status: str | None = None  # "approved", "pending", or None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "rule_id": self.rule_id,
             "rule_description": self.rule_description,
             "severity": self.severity.value,
@@ -97,6 +98,9 @@ class Violation:
             "file_path": self.file_path,
             "suggested_fix": self.suggested_fix,
         }
+        if self.approval_status is not None:
+            d["approval_status"] = self.approval_status
+        return d
 
 
 # ---------------------------------------------------------------------------
@@ -112,9 +116,15 @@ class GuardrailResult:
     summary: str
     change_set: ChangeSet
     rules_evaluated: int
+    pending_approvals: tuple[str, ...] = ()  # rule_ids with unresolved BLOCK
+
+    @property
+    def has_pending_blocks(self) -> bool:
+        """True when there are BLOCK violations awaiting human approval."""
+        return len(self.pending_approvals) > 0
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "passed": self.passed,
             "summary": self.summary,
             "rules_evaluated": self.rules_evaluated,
@@ -122,6 +132,9 @@ class GuardrailResult:
             "affected_files": list(self.change_set.affected_files),
             "modified_nodes": list(self.change_set.modified_nodes),
         }
+        if self.pending_approvals:
+            d["pending_approvals"] = list(self.pending_approvals)
+        return d
 
     def format_for_llm(self) -> str:
         """Render as structured text for LLM consumption."""
@@ -139,7 +152,12 @@ class GuardrailResult:
         parts.append("## Violations")
         parts.append("")
         for v in self.violations:
-            parts.append(f"### [{v.severity.value.upper()}] {v.rule_id}")
+            sev_label = v.severity.value.upper()
+            if v.approval_status == "approved":
+                sev_label = "BLOCK - APPROVED"
+            elif v.approval_status == "pending":
+                sev_label = "BLOCK - PENDING"
+            parts.append(f"### [{sev_label}] {v.rule_id}")
             parts.append(f"**Rule:** {v.rule_description}")
             parts.append(f"**Details:** {v.message}")
             if v.file_path:

@@ -53,12 +53,14 @@ jobs:
       - name: Run guardrail check
         id: guardrails
         run: |
+          EXIT_CODE=0
           git diff origin/${{ github.base_ref }}...HEAD | \
             mimir guardrail check --diff - \
               --rules mimir-rules.yaml \
               --output github-pr-comment \
               --report-file guardrail-report.md \
-            || echo "passed=false" >> $GITHUB_ENV
+            || EXIT_CODE=$?
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_ENV
           cat guardrail-report.md >> $GITHUB_STEP_SUMMARY
 
       - name: Comment on PR
@@ -68,6 +70,12 @@ jobs:
           header: mimir-guardrails
           path: guardrail-report.md
 
-      - name: Fail if violations
-        if: env.passed == 'false'
+      - name: Fail if errors
+        if: env.exit_code == '1'
         run: exit 1
+
+      - name: Fail if pending approvals
+        if: env.exit_code == '2'
+        run: |
+          echo "::warning::Guardrail BLOCK violations are pending human approval"
+          exit 1

@@ -10,6 +10,7 @@ from typing import Any
 
 import yaml
 
+from mimir.domain.approvals import ApprovalConfig
 from mimir.domain.errors import RuleConfigError
 from mimir.domain.guardrails import Rule, RuleType, Severity
 
@@ -143,6 +144,54 @@ def _parse_rule(raw: dict[str, Any], *, index: int, path: Path) -> Rule:
         description=str(raw["description"]),
         severity=severity,
         config=config,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Approval config loading
+# ---------------------------------------------------------------------------
+
+def load_approval_config(path: Path) -> ApprovalConfig:
+    """Parse the optional ``approval_config`` section from a rules YAML file.
+
+    Returns default ``ApprovalConfig`` if the section is absent or the file
+    cannot be read (fail-open — approval config is optional).
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return ApprovalConfig()
+
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return ApprovalConfig()
+
+    if not isinstance(data, dict):
+        return ApprovalConfig()
+
+    raw = data.get("approval_config")
+    if not isinstance(raw, dict):
+        return ApprovalConfig()
+
+    ttl = raw.get("default_ttl_days", 7)
+    if not isinstance(ttl, int) or ttl < 1:
+        raise RuleConfigError(
+            f"approval_config.default_ttl_days must be a positive integer, got {ttl!r}"
+        )
+
+    approvers = raw.get("approvers", [])
+    if not isinstance(approvers, list):
+        raise RuleConfigError("approval_config.approvers must be a list")
+
+    approvals_dir = raw.get("approvals_dir", ".mimir/approvals")
+    if not isinstance(approvals_dir, str):
+        raise RuleConfigError("approval_config.approvals_dir must be a string")
+
+    return ApprovalConfig(
+        default_ttl_days=ttl,
+        approvers=tuple(str(a) for a in approvers),
+        approvals_dir=approvals_dir,
     )
 
 

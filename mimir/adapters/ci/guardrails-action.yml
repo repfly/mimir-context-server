@@ -22,6 +22,17 @@ jobs:
 
       - name: Run guardrails
         run: |
+          EXIT_CODE=0
           git diff origin/${{ github.base_ref }}...HEAD | \
-            mimir guardrail check --diff - --rules mimir-rules.yaml --output github-pr-comment \
-            >> $GITHUB_STEP_SUMMARY
+            mimir guardrail check --diff - --rules mimir-rules.yaml \
+              --output github-pr-comment \
+              --report-file guardrail-report.md \
+            || EXIT_CODE=$?
+          cat guardrail-report.md >> $GITHUB_STEP_SUMMARY
+          if [ "$EXIT_CODE" = "1" ]; then
+            echo "::error::Guardrail errors found"
+            exit 1
+          elif [ "$EXIT_CODE" = "2" ]; then
+            echo "::warning::Guardrail BLOCK violations pending approval"
+            exit 1
+          fi

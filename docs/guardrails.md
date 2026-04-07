@@ -20,17 +20,20 @@ AI coding agents generate syntactically correct code that can silently introduce
 # Generate example rules + agent policy files
 mimir guardrail init
 
-# Validate staged changes before committing
-git diff --cached | mimir guardrail check --diff -
+# Auto-detect changes from git (staged → unstaged → branch diff)
+mimir guardrail check
 
-# Validate a branch against main
+# Diff against a specific base branch
+mimir guardrail check --base main
+
+# Explicit diff via stdin (for CI)
 git diff main...HEAD | mimir guardrail check --diff -
 
 # JSON output for CI pipelines
-git diff main...HEAD | mimir guardrail check --diff - --output json
+mimir guardrail check --base main --output json
 
 # GitHub PR comment output
-git diff main...HEAD | mimir guardrail check --diff - --output github-pr-comment
+mimir guardrail check --base main --output github-pr-comment
 
 # Dry-run: validate rules syntax against current graph
 mimir guardrail test
@@ -83,6 +86,72 @@ rules:
 ```
 
 Severity levels: `warning` (report only), `error` (block commit), `block` (require human approval).
+
+## Approval Workflow
+
+When a `block` severity rule fires, the pipeline exits with code **2** (pending approval) instead of code 1 (error). Approvals are **git-native YAML files** stored in `.mimir/approvals/` — platform-agnostic, auditable via `git log`.
+
+### Configuration
+
+Add an `approval_config` section to `mimir-rules.yaml`:
+
+```yaml
+approval_config:
+  default_ttl_days: 7           # approval expires after 7 days
+  approvers: [alice, bob]       # authorized approvers (git user.name)
+  approvals_dir: ".mimir/approvals"
+```
+
+Per-rule overrides are supported in `file_scope_ban` configs:
+
+```yaml
+- id: protect-auth
+  type: file_scope_ban
+  severity: block
+  config:
+    path_pattern: "*/auth/**"
+    require_human_approval: true
+    approvers: [security-lead]   # per-rule override
+    ttl_days: 3                  # per-rule TTL
+```
+
+### Workflow
+
+```bash
+# 1. Developer runs check — BLOCK violations auto-create an approval request
+git diff | mimir guardrail check --diff -
+# → exit code 2 (pending approval)
+# → Auto-created approval request: apr-a1b2c3d4
+
+# 2. Commit the request file
+git add .mimir/approvals/apr-a1b2c3d4.yaml
+
+# 3. Reviewer approves
+mimir guardrail approve apr-a1b2c3d4 --reason "Reviewed auth changes"
+git add .mimir/approvals/apr-a1b2c3d4.yaml
+
+# 4. Re-run check — now passes
+git diff | mimir guardrail check --diff -     # exits with code 0
+```
+
+The approval request is automatically created by `guardrail check` — no manual `request` step needed. If the diff changes after approval, the hash won't match and a new request will be auto-created on the next check.
+
+### CLI Commands
+
+| Command | Description |
+|---|---|
+| `mimir guardrail request --rules <ids> --diff <path>` | Manually create an approval request (auto-created by `check`) |
+| `mimir guardrail approve <id> --reason "..."` | Grant approval |
+| `mimir guardrail revoke <id>` | Revoke an approval |
+| `mimir guardrail status` | List all approval requests |
+| `mimir guardrail clean` | Remove expired/revoked approvals |
+
+### Key Properties
+
+- **Diff-hash binding**: Approvals are tied to the exact diff content (SHA-256). Any code change after approval invalidates it.
+- **TTL expiry**: Approvals expire after a configurable number of days (default 7).
+- **Exit codes**: `0` = passed, `1` = errors, `2` = blocks pending approval.
+- **`--no-approvals` flag**: Skip approval matching on `guardrail check` to see raw violations.
 
 ## Agent Policy (`mimir-agent-policy.yaml`)
 

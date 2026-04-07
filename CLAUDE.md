@@ -25,8 +25,17 @@ mimir quality           # Analyze graph connectivity gaps
 
 # Guardrails
 mimir guardrail init    # Generate example rules + agent policy
+mimir guardrail check                                    # Auto-detect diff from git
+mimir guardrail check --base main                        # Diff against specific branch
 mimir guardrail check --diff - --rules mimir-rules.yaml  # Validate diff (stdin)
 mimir guardrail test    # Dry-run: validate rule syntax
+
+# Guardrail Approvals (exit code 2 = pending approval)
+mimir guardrail request --rules <rule-ids> --diff -  # Create approval request
+mimir guardrail approve <request-id> --reason "..."  # Grant approval
+mimir guardrail revoke <request-id>                  # Revoke approval
+mimir guardrail status                               # List approvals
+mimir guardrail clean                                # Remove expired approvals
 ```
 
 ## Architecture
