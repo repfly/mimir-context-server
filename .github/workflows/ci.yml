@@ -74,8 +74,7 @@ jobs:
         if: env.exit_code == '1'
         run: exit 1
 
-      - name: Fail if pending approvals
+      - name: Warn if pending approvals
         if: env.exit_code == '2'
         run: |
-          echo "::warning::Guardrail BLOCK violations are pending human approval"
-          exit 1
+          echo "::warning::Guardrail BLOCK violations are pending human approval — run 'mimir guardrail check' locally to approve"

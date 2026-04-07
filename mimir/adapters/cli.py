@@ -387,9 +387,9 @@ def guardrail_check(
         formatted = json.dumps(out_dict, indent=2)
         console.print_json(formatted)
     elif output == "github-pr-comment":
+        # Don't pass auto_request_id — it's ephemeral in CI
         formatted = reporter.format_github_pr_comment(
             result, pending_rule_ids=pending_ids,
-            approval_request_id=auto_request_id,
         )
         console.print(formatted)
     else:

@@ -278,24 +278,15 @@ class TestFormatGithubPrCommentApprovals:
         assert "block (approved)" in md
         assert "block (pending)" in md
 
-    def test_approval_instructions_with_auto_request(self):
-        reporter = GuardrailReporter()
-        md = reporter.format_github_pr_comment(
-            _approval_result(), pending_rule_ids=("protect-ports",),
-            approval_request_id="apr-abc12345",
-        )
-        assert "Approval Required" in md
-        assert "apr-abc12345" in md
-        assert "mimir guardrail approve apr-abc12345" in md
-
-    def test_approval_instructions_without_request(self):
+    def test_approval_instructions(self):
         reporter = GuardrailReporter()
         md = reporter.format_github_pr_comment(
             _approval_result(), pending_rule_ids=("protect-ports",),
         )
         assert "Approval Required" in md
-        assert "mimir guardrail request --rules protect-ports" in md
+        assert "mimir guardrail check" in md
         assert "mimir guardrail approve" in md
+        assert "git add .mimir/approvals/" in md
 
 
 class TestFormatAuditLogApprovals:

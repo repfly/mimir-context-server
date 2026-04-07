@@ -80,7 +80,6 @@ class GuardrailReporter:
     def format_github_pr_comment(
         self, result: GuardrailResult, *,
         pending_rule_ids: tuple[str, ...] = (),
-        approval_request_id: str | None = None,
     ) -> str:
         """Markdown formatted for GitHub PR comment."""
         parts: list[str] = []
@@ -137,21 +136,10 @@ class GuardrailReporter:
                 parts.append("")
                 parts.append("### Approval Required")
                 parts.append("")
-                if approval_request_id:
-                    parts.append(
-                        f"Approval request `{approval_request_id}` was auto-created. "
-                        "Run locally to approve:"
-                    )
-                    parts.append("```bash")
-                    parts.append(
-                        f"mimir guardrail approve {approval_request_id} --reason \"...\""
-                    )
-                else:
-                    rule_csv = ",".join(pending_rule_ids)
-                    parts.append("To approve these changes, run locally:")
-                    parts.append("```bash")
-                    parts.append(f"mimir guardrail request --rules {rule_csv}")
-                    parts.append("mimir guardrail approve <request-id> --reason \"...\"")
+                parts.append("Run locally to create and approve:")
+                parts.append("```bash")
+                parts.append("mimir guardrail check          # auto-creates approval request")
+                parts.append("mimir guardrail approve <request-id> --reason \"...\"")
                 parts.append("git add .mimir/approvals/ && git commit && git push")
                 parts.append("```")
         else:
