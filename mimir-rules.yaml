@@ -1,0 +1,262 @@
+# ---------------------------------------------------------------------------
+# Guardrail rules
+#
+# BLOCK-severity rules require a human approval to pass. Approvals live
+# entirely in the HEAD commit's message via trailers:
+#
+#     Mimir-Approved: <rule-id>[, <rule-id>...]
+#     Mimir-Approved-Reason: <why>
+#
+# Any new commit without the trailer invalidates the approval — the
+# source of truth is the HEAD commit, nothing else.
+# ---------------------------------------------------------------------------
+rules:
+  # ===================================================================
+  # HEXAGONAL LAYER ENFORCEMENT
+  # Domain → Ports → Services → Adapters → Container
+  # Each layer may only import from layers below it.
+  # ===================================================================
+
+  # Domain must not know about anything above it
+  - id: no-domain-to-services
+    type: dependency_ban
+    description: "Domain layer must not import from services"
+    severity: error
+    config:
+      source_pattern: "*/domain/*"
+      target_pattern: "*/services/*"
+
+  - id: no-domain-to-infra
+    type: dependency_ban
+    description: "Domain layer must not import from infrastructure"
+    severity: error
+    config:
+      source_pattern: "*/domain/*"
+      target_pattern: "*/infra/*"
+
+  - id: no-domain-to-adapters
+    type: dependency_ban
+    description: "Domain layer must not import from adapters"
+    severity: error
+    config:
+      source_pattern: "*/domain/*"
+      target_pattern: "*/adapters/*"
+
+  # Ports must not know about implementations
+  - id: no-ports-to-services
+    type: dependency_ban
+    description: "Ports must not import from services"
+    severity: error
+    config:
+      source_pattern: "*/ports/*"
+      target_pattern: "*/services/*"
+
+  - id: no-ports-to-infra
+    type: dependency_ban
+    description: "Ports must not import from infrastructure"
+    severity: error
+    config:
+      source_pattern: "*/ports/*"
+      target_pattern: "*/infra/*"
+
+  - id: no-ports-to-adapters
+    type: dependency_ban
+    description: "Ports must not import from adapters"
+    severity: error
+    config:
+      source_pattern: "*/ports/*"
+      target_pattern: "*/adapters/*"
+
+  # Services must not import from adapters or infra directly
+  - id: no-services-to-adapters
+    type: dependency_ban
+    description: "Services must not import from adapters"
+    severity: error
+    config:
+      source_pattern: "*/services/*"
+      target_pattern: "*/adapters/*"
+
+  - id: no-services-to-infra
+    type: dependency_ban
+    description: "Services must use ports, not import infra directly"
+    severity: error
+    config:
+      source_pattern: "*/services/*"
+      target_pattern: "*/infra/*"
+
+  # Adapters must not bypass the service layer to reach infra
+  - id: no-adapters-to-infra
+    type: dependency_ban
+    description: "Adapters must not import from infrastructure directly (use Container)"
+    severity: error
+    config:
+      source_pattern: "*/adapters/*"
+      target_pattern: "*/infra/*"
+
+  # Infra must not depend on services or adapters
+  - id: no-infra-to-services
+    type: dependency_ban
+    description: "Infrastructure must not import from services"
+    severity: error
+    config:
+      source_pattern: "*/infra/*"
+      target_pattern: "*/services/*"
+
+  - id: no-infra-to-adapters
+    type: dependency_ban
+    description: "Infrastructure must not import from adapters"
+    severity: error
+    config:
+      source_pattern: "*/infra/*"
+      target_pattern: "*/adapters/*"
+
+  # Adapters should use service interfaces, not private helpers
+  - id: no-adapter-to-service-internals
+    type: dependency_ban
+    description: "Adapters must go through service interfaces, not internal helpers"
+    severity: warning
+    config:
+      source_pattern: "*/adapters/*"
+      target_pattern: "*/services/_*"
+
+  # ===================================================================
+  # CYCLE PREVENTION
+  # ===================================================================
+
+  - id: no-circular-imports
+    type: cycle_detection
+    description: "No circular imports within the repository"
+    severity: error
+    config:
+      scope: intra_repo
+      edge_kinds: [imports]
+
+  - id: no-circular-services
+    type: cycle_detection
+    description: "No circular dependencies between services"
+    severity: error
+    config:
+      scope: cross_repo
+      edge_kinds: [api_calls, shared_lib]
+
+  # ===================================================================
+  # COUPLING LIMITS
+  # ===================================================================
+
+  # Core domain models are high fan-in by design, but set a ceiling
+  - id: max-inbound-coupling
+    type: metric_threshold
+    description: "No module should have more than 25 inbound dependencies"
+    severity: warning
+    config:
+      metric: afferent_coupling
+      threshold: 25
+
+  # Services should not have too many outbound deps (God service smell)
+  - id: max-outbound-coupling
+    type: metric_threshold
+    description: "No service should depend on more than 15 other modules"
+    severity: warning
+    config:
+      metric: efferent_coupling
+      threshold: 15
+      target_pattern: "*/services/*"
+
+  # Domain layer must be stable (low instability = mostly depended upon)
+  - id: domain-stability
+    type: metric_threshold
+    description: "Domain layer must be stable (low instability ratio)"
+    severity: warning
+    config:
+      metric: instability
+      threshold: 0.8
+      target_pattern: "*/domain/*"
+
+  # Ports layer must be fully stable (only depended upon, never depends outward)
+  - id: ports-stability
+    type: metric_threshold
+    description: "Port interfaces must be stable"
+    severity: warning
+    config:
+      metric: instability
+      threshold: 0.5
+      target_pattern: "*/ports/*"
+
+  # ===================================================================
+  # BLAST RADIUS PROTECTION
+  # ===================================================================
+
+  # Core domain types are imported everywhere — flag high-impact changes
+  - id: core-model-blast-radius
+    type: impact_threshold
+    description: "Changes to core domain models affect many consumers — review carefully"
+    severity: warning
+    config:
+      target_kind: [class, type]
+      target_pattern: "*/domain/models*"
+      max_impact: 15
+      max_hops: 2
+
+  # Port interface changes cascade to all implementations and consumers
+  - id: port-interface-blast-radius
+    type: impact_threshold
+    description: "Port interface changes break all implementations — requires review"
+    severity: error
+    config:
+      target_kind: [class, type]
+      target_pattern: "*/ports/*"
+      max_impact: 8
+
+  # CodeGraph is the backbone — changes ripple everywhere
+  - id: graph-blast-radius
+    type: impact_threshold
+    description: "CodeGraph changes affect nearly every service"
+    severity: warning
+    config:
+      target_kind: [class, function, method]
+      target_pattern: "*/domain/graph*"
+      max_impact: 10
+      max_hops: 2
+
+  # ===================================================================
+  # CRITICAL FILE PROTECTION
+  # ===================================================================
+
+  # DI container is the architectural wiring point — must be reviewed
+  - id: protect-container
+    type: file_scope_ban
+    description: "Container (DI wiring) changes require review"
+    severity: block
+    config:
+      path_pattern: "*/container.py"
+
+  # Port interfaces define the system's boundaries
+  - id: protect-ports
+    type: file_scope_ban
+    description: "Port interface changes require review (affects all implementations)"
+    severity: block
+    config:
+      path_pattern: "*/ports/*"
+
+  # Config schema changes can break all deployments
+  - id: protect-config-schema
+    type: file_scope_ban
+    description: "Config schema changes affect all deployments"
+    severity: block
+    config:
+      path_pattern: "*/domain/config.py"
+
+  # CI/CD and Docker changes affect the entire pipeline
+  - id: protect-ci
+    type: file_scope_ban
+    description: "CI/CD changes require review"
+    severity: block
+    config:
+      path_pattern: "*/.github/*"
+
+  - id: protect-docker
+    type: file_scope_ban
+    description: "Docker config changes require review"
+    severity: block
+    config:
+      path_pattern: "*/Dockerfile"

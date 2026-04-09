@@ -42,3 +42,11 @@ class RetrievalError(TreeDexError):
 
 class SessionError(TreeDexError):
     """Failure in session management."""
+
+
+class GuardrailError(TreeDexError):
+    """Failure during guardrail evaluation."""
+
+
+class RuleConfigError(GuardrailError):
+    """Invalid or missing guardrail rule configuration."""

@@ -1,26 +1,24 @@
-# Mimir v1 — Test Configuration
+# Mimir — self-index configuration
+# Indexes the Mimir source code itself for development and CI.
 
 [[repos]]
-name = "example-shop"
-path = "./example-shop"
-language_hint = "python"
-
-[[repos]]
-name = "click"
-path = "./example-click"
+name = "mimir"
+path = "."
 language_hint = "python"
 
 [indexing]
 summary_mode = "heuristic"
-concurrency = 4
-excluded_patterns = ["__pycache__", ".git", "*.pyc", "node_modules", "venv", ".venv", "*.egg-info", "dist", "build"]
+concurrency = 8
+excluded_patterns = [
+    "__pycache__", ".git", "*.pyc", ".venv", "venv",
+    "dist", "build", "*.egg-info",
+    "node_modules", "backstage-plugin",
+]
 max_file_size_kb = 500
-
-[llm]
-model = "ollama/qwen2.5-coder:7b"
 
 [embeddings]
 model = "all-mpnet-base-v2"
+batch_size = 64
 
 [vector_db]
 backend = "numpy"
@@ -29,7 +27,11 @@ backend = "numpy"
 default_beam_width = 3
 default_token_budget = 8000
 expansion_hops = 2
+relevance_gate = 0.3
 
 [temporal]
 recency_lambda = 0.02
 co_retrieval_enabled = true
+
+[session]
+context_decay_turns = 5

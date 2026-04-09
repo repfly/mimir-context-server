@@ -42,6 +42,7 @@ dependencies = [
     "rank-bm25>=0.2",
     "rich>=14.0",
     "watchdog>=6.0",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]

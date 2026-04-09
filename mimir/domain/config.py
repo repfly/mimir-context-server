@@ -154,6 +154,25 @@ class MimirConfig:
         if not self.repos:
             raise ConfigError("At least one repo must be configured")
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.project_dir.mkdir(parents=True, exist_ok=True)
+        self.session_dir.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # Layout: .mimir/ is split into two subfolders
+    #   project/  — shared data tracked in git (graph.db)
+    #   session/  — personal / derived data ignored by git
+    #               (sessions.db, embedding model cache, chroma store)
+    # ------------------------------------------------------------------
+
+    @property
+    def project_dir(self) -> Path:
+        """Data that is shared across developers and CI (tracked in git)."""
+        return self.data_dir / "project"
+
+    @property
+    def session_dir(self) -> Path:
+        """Data that is personal or derived and should stay out of git."""
+        return self.data_dir / "session"
 
     @classmethod
     def load(cls, path: Path) -> MimirConfig:
