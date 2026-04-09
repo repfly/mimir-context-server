@@ -105,7 +105,12 @@ Guardrails config: `mimir-rules.yaml` (architectural rules) and `mimir-agent-pol
 
 ## Storage
 
-Default location: `.mimir/`. Tracked in git: `graph.db` (code graph). Ignored: `sessions.db` (personal), `models/` (downloaded embeddings), `chroma/` (derived). Run `mimir index` and commit `graph.db` after significant code changes.
+Default location: `.mimir/`, split into two subfolders:
+
+- **`.mimir/project/`** — tracked in git. Contains `graph.db` (the code graph). Committing this lets CI skip re-indexing and lets new developers get a working context engine on clone.
+- **`.mimir/session/`** — ignored by git. Contains `sessions.db` (session state), `models/` (downloaded embedding weights), `chroma/` (derived vector store). Anything personal or re-derivable lives here.
+
+Run `mimir index` and commit `.mimir/project/graph.db` after significant code changes.
 
 ## Docker
 

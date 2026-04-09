@@ -20,12 +20,8 @@ build/
 dist/
 *.egg-info/
 
-# Mimir — personal & derived data (graph.db is tracked)
-.mimir/sessions.db
-.mimir/models/
-.mimir/chroma/
-.mimir/*-wal
-.mimir/*-shm
+# Mimir — split into project/ (tracked) and session/ (ignored)
+.mimir/session/
 
 # Local / personal configs
 mimir-self.toml

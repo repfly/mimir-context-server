@@ -265,6 +265,15 @@ def guardrail_check(
         False, "--no-approvals",
         help="Ignore HEAD commit trailers (show raw BLOCK violations)",
     ),
+    head: str = typer.Option(
+        "HEAD", "--head",
+        help=(
+            "Git ref whose commit message is scanned for Mimir-Approved "
+            "trailers. Defaults to HEAD. In GitHub Actions on pull_request "
+            "events, pass ${{ github.event.pull_request.head.sha }} because "
+            "the default checkout is a merge commit without the trailer."
+        ),
+    ),
     config: Path = typer.Option(_DEFAULT_CONFIG, "--config", "-c"),
     workspace: Optional[str] = typer.Option(None, "--workspace", "-w"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
@@ -334,7 +343,7 @@ def guardrail_check(
             v.severity.value == "block" for v in result.violations
         )
         if block_present:
-            head_approval = read_head_approval()
+            head_approval = read_head_approval(head)
             if head_approval is None:
                 approved_ids: frozenset[str] = frozenset()
                 reason = ""
@@ -598,7 +607,7 @@ def index(
     # shifts into readonly mode and all subsequent writes fail with code 1032.
     if clean:
         import shutil
-        chroma_dir = cfg.vector_db.persist_directory or str(cfg.data_dir / "chroma")
+        chroma_dir = cfg.vector_db.persist_directory or str(cfg.session_dir / "chroma")
         chroma_path = Path(chroma_dir)
         if chroma_path.exists() and cfg.vector_db.backend == "chroma":
             shutil.rmtree(chroma_path)

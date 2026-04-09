@@ -34,13 +34,13 @@ class Container:
         # Vector store
         self.vector_store = self._build_vector_store()
 
-        # Graph store
+        # Graph store — lives in the tracked project/ folder
         from mimir.infra.stores.sqlite_graph import SqliteGraphStore
-        self.graph_store = SqliteGraphStore(config.data_dir / "graph.db")
+        self.graph_store = SqliteGraphStore(config.project_dir / "graph.db")
 
-        # Session store
+        # Session store — lives in the ignored session/ folder
         from mimir.infra.stores.sqlite_session import SqliteSessionStore
-        self.session_store = SqliteSessionStore(config.data_dir / "sessions.db")
+        self.session_store = SqliteSessionStore(config.session_dir / "sessions.db")
 
         # LLM client (used by the `ask` CLI command for interactive Q&A)
         self.llm_client = self._build_llm_client()
@@ -120,14 +120,14 @@ class Container:
                 # Default: run locally via sentence-transformers
                 from mimir.infra.embedders.local import LocalEmbedder
                 model_name = model.removeprefix("local:") if model.startswith("local:") else model
-                cache_dir = self.config.embeddings.cache_dir or str(self.config.data_dir / "models")
+                cache_dir = self.config.embeddings.cache_dir or str(self.config.session_dir / "models")
                 logger.info("Using local embedder: %s (cache: %s)", model_name, cache_dir)
                 return LocalEmbedder(model_name=model_name, cache_dir=cache_dir)
         else:
             # Default: run locally via sentence-transformers
             from mimir.infra.embedders.local import LocalEmbedder
             model_name = model.removeprefix("local:") if model.startswith("local:") else model
-            cache_dir = self.config.embeddings.cache_dir or str(self.config.data_dir / "models")
+            cache_dir = self.config.embeddings.cache_dir or str(self.config.session_dir / "models")
             logger.info("Using local embedder: %s (cache: %s)", model_name, cache_dir)
             return LocalEmbedder(model_name=model_name, cache_dir=cache_dir)
 
@@ -137,7 +137,7 @@ class Container:
             from mimir.infra.vector_stores.chroma import ChromaVectorStore
             return ChromaVectorStore(
                 persist_directory=self.config.vector_db.persist_directory
-                or str(self.config.data_dir / "chroma"),
+                or str(self.config.session_dir / "chroma"),
             )
         else:
             from mimir.infra.vector_stores.numpy_store import NumpyVectorStore

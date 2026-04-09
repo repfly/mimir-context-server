@@ -47,15 +47,20 @@ Infra (concrete implementations: tree-sitter, sentence-transformers/jina, SQLite
 
 ## Data Storage
 
-Mimir stores all index data in a local directory (default `.mimir/`, configurable via `data_dir` in config):
+Mimir stores all index data in a local directory (default `.mimir/`, configurable via `data_dir` in config). It is split into two subfolders so git can track one and ignore the other:
 
 ```
 .mimir/
-├── graph.db          # SQLite: nodes, edges, repo_state, embeddings
-├── sessions.db       # SQLite: session state for deduplication
-├── guardrail_audit.jsonl  # Guardrail check audit log (if enabled)
-└── chroma/           # ChromaDB data (only if backend = "chroma")
+├── project/                    # tracked in git — shared with CI & teammates
+│   └── graph.db                #   SQLite: nodes, edges, repo_state, embeddings
+└── session/                    # ignored by git — personal / re-derivable
+    ├── sessions.db             #   SQLite: session state for deduplication
+    ├── models/                 #   downloaded embedding weights
+    ├── chroma/                 #   ChromaDB data (only if backend = "chroma")
+    └── guardrail_audit.jsonl   #   Guardrail check audit log (if enabled)
 ```
+
+Committing `.mimir/project/graph.db` lets CI run `mimir guardrail check` without rebuilding the graph from scratch, which is the biggest cold-start cost in the pipeline.
 
 ## Supported Languages
 

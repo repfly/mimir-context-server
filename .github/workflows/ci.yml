@@ -54,10 +54,11 @@ jobs:
         id: guardrails
         run: |
           EXIT_CODE=0
-          git diff origin/${{ github.base_ref }}...HEAD | \
+          git diff origin/${{ github.base_ref }}...${{ github.event.pull_request.head.sha }} | \
             mimir guardrail check --diff - \
               --rules mimir-rules.yaml \
               --base origin/${{ github.base_ref }} \
+              --head ${{ github.event.pull_request.head.sha }} \
               --output github-pr-comment \
               --report-file guardrail-report.md \
             || EXIT_CODE=$?
