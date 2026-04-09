@@ -231,46 +231,33 @@ def _approval_result() -> GuardrailResult:
             ),
         ),
         passed=False,
-        summary="Pending approval. 1 block(s) pending. 1 block(s) approved. 1 warning(s)",
+        summary="Violations found. 1 block(s) pending. 1 block(s) approved. 1 warning(s)",
         change_set=ChangeSet(
             affected_files=("container.py", "ports/parser.py", "src/models.py"),
         ),
         rules_evaluated=5,
-        pending_approvals=("protect-ports",),
     )
 
 
 class TestFormatTextApprovals:
-    def test_approved_block_shown_green(self):
+    def test_approved_block_shown_distinctly(self):
         reporter = GuardrailReporter()
         text = reporter.format_text(_approval_result())
         assert "BLOCK (approved)" in text
         assert "BLOCK (pending approval)" in text
 
-    def test_pending_instructions_with_auto_request(self):
+    def test_pending_instructions_show_approve_command(self):
         reporter = GuardrailReporter()
-        text = reporter.format_text(
-            _approval_result(), pending_rule_ids=("protect-ports",),
-            approval_request_id="apr-abc12345",
-        )
-        assert "apr-abc12345" in text
-        assert "mimir guardrail approve apr-abc12345" in text
-        assert "git add .mimir/approvals/" in text
-
-    def test_pending_instructions_without_request(self):
-        reporter = GuardrailReporter()
-        text = reporter.format_text(
-            _approval_result(), pending_rule_ids=("protect-ports",),
-        )
-        assert "mimir guardrail request --rules protect-ports" in text
-        assert "mimir guardrail approve" in text
+        text = reporter.format_text(_approval_result())
+        assert "mimir guardrail approve protect-ports --reason" in text
+        assert "git push" in text
 
 
 class TestFormatGithubPrCommentApprovals:
-    def test_pending_approval_header(self):
+    def test_failed_header(self):
         reporter = GuardrailReporter()
         md = reporter.format_github_pr_comment(_approval_result())
-        assert "Pending Approval" in md
+        assert "Failed" in md
 
     def test_approval_badges(self):
         reporter = GuardrailReporter()
@@ -280,22 +267,17 @@ class TestFormatGithubPrCommentApprovals:
 
     def test_approval_instructions(self):
         reporter = GuardrailReporter()
-        md = reporter.format_github_pr_comment(
-            _approval_result(), pending_rule_ids=("protect-ports",),
-        )
+        md = reporter.format_github_pr_comment(_approval_result())
         assert "Approval Required" in md
-        assert "mimir guardrail check" in md
-        assert "mimir guardrail approve" in md
-        assert "git add .mimir/approvals/" in md
+        assert "mimir guardrail approve protect-ports --reason" in md
+        assert "Mimir-Approved" in md
 
 
 class TestFormatAuditLogApprovals:
-    def test_includes_pending_approvals(self):
+    def test_no_pending_key_in_entry(self):
         reporter = GuardrailReporter()
         entry = reporter.format_audit_log(_approval_result())
-        assert entry["pending_approvals"] == ["protect-ports"]
-
-    def test_no_pending_key_when_empty(self):
-        reporter = GuardrailReporter()
-        entry = reporter.format_audit_log(_passed_result())
+        # Approval status is per-violation only — no separate pending_approvals
+        # key exists on the audit entry any more.
         assert "pending_approvals" not in entry
+        assert entry["violations"][1]["approval_status"] == "pending"

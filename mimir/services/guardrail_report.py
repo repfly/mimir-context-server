@@ -14,14 +14,35 @@ from typing import Any, Optional
 from mimir.domain.guardrails import GuardrailResult, Severity
 
 
+def _pending_rule_ids(result: GuardrailResult) -> list[str]:
+    """Return unique rule ids for BLOCK violations still marked pending."""
+    seen: list[str] = []
+    for v in result.violations:
+        if (
+            v.severity == Severity.BLOCK
+            and v.approval_status == "pending"
+            and v.rule_id not in seen
+        ):
+            seen.append(v.rule_id)
+    return seen
+
+
+def _approval_instructions(pending: list[str]) -> list[str]:
+    """Return the copy-paste approval command for the given pending rules."""
+    rule_args = " ".join(pending)
+    return [
+        "Run on the PR branch to clear these BLOCKs:",
+        f"  mimir guardrail approve {rule_args} --reason \"...\"",
+        "  git push",
+        "",
+        "This creates an empty commit with a Mimir-Approved trailer on HEAD.",
+    ]
+
+
 class GuardrailReporter:
     """Formats GuardrailResult for different output targets."""
 
-    def format_text(
-        self, result: GuardrailResult, *,
-        pending_rule_ids: tuple[str, ...] = (),
-        approval_request_id: str | None = None,
-    ) -> str:
+    def format_text(self, result: GuardrailResult) -> str:
         """Human-readable terminal output with rich markup."""
         parts: list[str] = []
 
@@ -54,22 +75,12 @@ class GuardrailReporter:
                 if v.suggested_fix:
                     parts.append(f"    Fix: {v.suggested_fix}")
 
-        if pending_rule_ids:
+        pending = _pending_rule_ids(result)
+        if pending:
             parts.append("")
-            if approval_request_id:
-                parts.append(
-                    f"[yellow]Approval request created:[/yellow] {approval_request_id}"
-                )
-                parts.append("[yellow]To approve:[/yellow]")
-                parts.append(
-                    f"  mimir guardrail approve {approval_request_id} --reason \"...\""
-                )
-            else:
-                rule_csv = ",".join(pending_rule_ids)
-                parts.append("[yellow]To resolve pending blocks:[/yellow]")
-                parts.append(f"  mimir guardrail request --rules {rule_csv}")
-                parts.append("  mimir guardrail approve <request-id> --reason \"...\"")
-            parts.append("  git add .mimir/approvals/ && git commit && git push")
+            parts.append("[yellow]To resolve pending blocks:[/yellow]")
+            for line in _approval_instructions(pending):
+                parts.append(f"  {line}" if line else "")
 
         return "\n".join(parts)
 
@@ -77,19 +88,12 @@ class GuardrailReporter:
         """Machine-readable JSON."""
         return result.to_dict()
 
-    def format_github_pr_comment(
-        self, result: GuardrailResult, *,
-        pending_rule_ids: tuple[str, ...] = (),
-    ) -> str:
+    def format_github_pr_comment(self, result: GuardrailResult) -> str:
         """Markdown formatted for GitHub PR comment."""
         parts: list[str] = []
 
         if result.passed:
             parts.append("## ✅ Mimir Guardrail Check — Passed")
-        elif result.has_pending_blocks and not any(
-            v.severity == Severity.ERROR for v in result.violations
-        ):
-            parts.append("## ⏳ Mimir Guardrail Check — Pending Approval")
         else:
             parts.append("## ❌ Mimir Guardrail Check — Failed")
 
@@ -132,16 +136,26 @@ class GuardrailReporter:
                     parts.append(f"- **{v.rule_id}**: {v.suggested_fix}")
 
             # Approval instructions for pending blocks
-            if pending_rule_ids:
+            pending = _pending_rule_ids(result)
+            if pending:
                 parts.append("")
                 parts.append("### Approval Required")
                 parts.append("")
-                parts.append("Run locally to create and approve:")
+                parts.append(
+                    "These BLOCK rules need a human approval. On the PR "
+                    "branch, run:"
+                )
+                parts.append("")
                 parts.append("```bash")
-                parts.append("mimir guardrail check          # auto-creates approval request")
-                parts.append("mimir guardrail approve <request-id> --reason \"...\"")
-                parts.append("git add .mimir/approvals/ && git commit && git push")
+                parts.append(f"mimir guardrail approve {' '.join(pending)} --reason \"...\"")
+                parts.append("git push")
                 parts.append("```")
+                parts.append("")
+                parts.append(
+                    "The command adds an empty commit with a "
+                    "`Mimir-Approved:` trailer on HEAD. Any subsequent commit "
+                    "without the trailer re-invalidates the approval."
+                )
         else:
             parts.append("")
             parts.append("No architectural violations detected. 🎉")
@@ -160,7 +174,7 @@ class GuardrailReporter:
         change_hash: Optional[str] = None,
     ) -> dict[str, Any]:
         """Structured audit entry for compliance (EU AI Act Article 9)."""
-        entry: dict[str, Any] = {
+        return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "change_hash": change_hash,
             "agent_id": agent_id,
@@ -170,9 +184,6 @@ class GuardrailReporter:
             "violations": [v.to_dict() for v in result.violations],
             "affected_files": list(result.change_set.affected_files),
         }
-        if result.pending_approvals:
-            entry["pending_approvals"] = list(result.pending_approvals)
-        return entry
 
 
 def append_audit_entry(data_dir: Path, entry: dict[str, Any]) -> None:

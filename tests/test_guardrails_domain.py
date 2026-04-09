@@ -16,7 +16,7 @@ from mimir.domain.guardrails import (
     Severity,
     Violation,
 )
-from mimir.domain.guardrails_config import load_approval_config, load_rules
+from mimir.domain.guardrails_config import load_rules
 
 
 # ---------------------------------------------------------------------------
@@ -160,24 +160,6 @@ class TestGuardrailResult:
         assert "[BLOCK]" in text
         assert "fix it" in text
 
-    def test_pending_approvals(self):
-        result = GuardrailResult(
-            violations=(), passed=False, summary="pending",
-            change_set=ChangeSet(), rules_evaluated=1,
-            pending_approvals=("protect-container",),
-        )
-        assert result.has_pending_blocks is True
-        d = result.to_dict()
-        assert d["pending_approvals"] == ["protect-container"]
-
-    def test_no_pending_approvals_not_in_dict(self):
-        result = GuardrailResult(
-            violations=(), passed=True, summary="ok",
-            change_set=ChangeSet(), rules_evaluated=1,
-        )
-        assert result.has_pending_blocks is False
-        assert "pending_approvals" not in result.to_dict()
-
     def test_format_for_llm_approval_status(self):
         result = GuardrailResult(
             violations=(
@@ -192,7 +174,6 @@ class TestGuardrailResult:
             ),
             passed=False, summary="fail",
             change_set=ChangeSet(), rules_evaluated=2,
-            pending_approvals=("r2",),
         )
         text = result.format_for_llm()
         assert "[BLOCK - APPROVED]" in text
@@ -308,41 +289,3 @@ class TestLoadRules:
             assert len(rules) > 0
 
 
-class TestLoadApprovalConfig:
-    def test_returns_defaults_when_missing(self, tmp_path: Path):
-        cfg = load_approval_config(tmp_path / "nonexistent.yaml")
-        assert cfg.default_ttl_days == 7
-        assert cfg.approvers == ()
-
-    def test_returns_defaults_when_no_section(self, tmp_path: Path):
-        f = tmp_path / "rules.yaml"
-        f.write_text("rules: []\n")
-        cfg = load_approval_config(f)
-        assert cfg.default_ttl_days == 7
-
-    def test_parses_approval_config(self, tmp_path: Path):
-        f = tmp_path / "rules.yaml"
-        f.write_text(textwrap.dedent("""\
-            approval_config:
-              default_ttl_days: 14
-              approvers:
-                - alice
-                - bob
-              approvals_dir: custom/approvals
-            rules: []
-        """))
-        cfg = load_approval_config(f)
-        assert cfg.default_ttl_days == 14
-        assert cfg.approvers == ("alice", "bob")
-        assert cfg.approvals_dir == "custom/approvals"
-
-    def test_invalid_ttl_raises(self, tmp_path: Path):
-        f = tmp_path / "rules.yaml"
-        f.write_text(textwrap.dedent("""\
-            approval_config:
-              default_ttl_days: -1
-            rules: []
-        """))
-        from mimir.domain.errors import RuleConfigError
-        with pytest.raises(RuleConfigError, match="positive integer"):
-            load_approval_config(f)

@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from mimir.domain.approvals import ApprovalRequest, ApprovalStatus
 from mimir.domain.graph import CodeGraph
 from mimir.domain.guardrails import ChangeSet, GuardrailResult, Rule, RuleType, Severity, Violation
 from mimir.domain.models import Edge, EdgeKind, Node, NodeKind
@@ -403,7 +402,7 @@ class TestFileScopeBan:
             type=RuleType.FILE_SCOPE_BAN,
             description="Auth requires review",
             severity=Severity.BLOCK,
-            config={"path_pattern": "*/auth/*", "require_human_approval": True},
+            config={"path_pattern": "*/auth/*"},
         )
         svc = _make_service(change)
         result = await svc.evaluate(graph, "fake diff", [rule])
@@ -411,7 +410,7 @@ class TestFileScopeBan:
         assert not result.passed
         assert len(result.violations) == 1
         assert result.violations[0].severity == Severity.BLOCK
-        assert "human approval" in result.violations[0].message
+        assert "protected pattern" in result.violations[0].message
 
     async def test_non_banned_file_passes(self):
         graph = _build_graph()
@@ -527,7 +526,7 @@ class TestCombinedEvaluation:
 
 
 # ---------------------------------------------------------------------------
-# apply_approvals tests
+# apply_approvals tests (HEAD-trailer model)
 # ---------------------------------------------------------------------------
 
 
@@ -541,57 +540,52 @@ def _make_result(violations: tuple[Violation, ...], passed: bool = False) -> Gua
     )
 
 
-def _make_approval(rule_ids, branch="feat/x", status=ApprovalStatus.APPROVED, expires_at="2099-01-01T00:00:00+00:00"):
-    return ApprovalRequest(
-        id="apr-test1234",
-        rule_ids=tuple(rule_ids),
-        diff_hash="sha256:audit-only",
-        branch=branch,
-        status=status,
-        requested_by="alice",
-        requested_at="2026-04-06T10:00:00+00:00",
-        approved_by="bob",
-        approved_at="2026-04-06T11:00:00+00:00",
-        reason="ok",
-        expires_at=expires_at,
-    )
-
-
 class TestApplyApprovals:
     def test_matching_approval_downgrades_block(self):
         violations = (
             Violation(rule_id="r1", rule_description="d", severity=Severity.BLOCK, message="m"),
         )
-        result = _make_result(violations)
-        approval = _make_approval(["r1"], "feat/x")
-
-        new_result = apply_approvals(result, [approval], "feat/x")
-
+        new_result = apply_approvals(
+            _make_result(violations),
+            approved_rule_ids=frozenset({"r1"}),
+            reason="legal signoff",
+        )
         assert new_result.passed is True
         assert new_result.violations[0].approval_status == "approved"
-        assert new_result.pending_approvals == ()
 
-    def test_no_matching_approval_marks_pending(self):
+    def test_unmatched_rule_stays_pending(self):
         violations = (
             Violation(rule_id="r1", rule_description="d", severity=Severity.BLOCK, message="m"),
         )
-        result = _make_result(violations)
-
-        new_result = apply_approvals(result, [], "feat/x")
-
+        new_result = apply_approvals(
+            _make_result(violations),
+            approved_rule_ids=frozenset({"r2"}),  # wrong rule
+            reason="ok",
+        )
         assert new_result.passed is False
         assert new_result.violations[0].approval_status == "pending"
-        assert "r1" in new_result.pending_approvals
 
-    def test_wrong_branch_does_not_match(self):
+    def test_no_trailer_marks_pending(self):
         violations = (
             Violation(rule_id="r1", rule_description="d", severity=Severity.BLOCK, message="m"),
         )
-        result = _make_result(violations)
-        approval = _make_approval(["r1"], "other-branch")
+        new_result = apply_approvals(
+            _make_result(violations),
+            approved_rule_ids=frozenset(),
+            reason="",
+        )
+        assert new_result.passed is False
+        assert new_result.violations[0].approval_status == "pending"
 
-        new_result = apply_approvals(result, [approval], "feat/x")
-
+    def test_empty_reason_voids_approval(self):
+        violations = (
+            Violation(rule_id="r1", rule_description="d", severity=Severity.BLOCK, message="m"),
+        )
+        new_result = apply_approvals(
+            _make_result(violations),
+            approved_rule_ids=frozenset({"r1"}),
+            reason="",
+        )
         assert new_result.passed is False
         assert new_result.violations[0].approval_status == "pending"
 
@@ -600,11 +594,11 @@ class TestApplyApprovals:
             Violation(rule_id="r1", rule_description="d", severity=Severity.ERROR, message="m"),
             Violation(rule_id="r2", rule_description="d", severity=Severity.BLOCK, message="m"),
         )
-        result = _make_result(violations)
-        approval = _make_approval(["r2"], "feat/x")
-
-        new_result = apply_approvals(result, [approval], "feat/x")
-
+        new_result = apply_approvals(
+            _make_result(violations),
+            approved_rule_ids=frozenset({"r2"}),
+            reason="ok",
+        )
         assert new_result.passed is False
         assert new_result.violations[1].approval_status == "approved"
 
@@ -612,34 +606,23 @@ class TestApplyApprovals:
         violations = (
             Violation(rule_id="r1", rule_description="d", severity=Severity.WARNING, message="m"),
         )
-        result = _make_result(violations, passed=True)
-
-        new_result = apply_approvals(result, [], "feat/x")
-
+        new_result = apply_approvals(
+            _make_result(violations, passed=True),
+            approved_rule_ids=frozenset(),
+            reason="",
+        )
         assert new_result.passed is True
         assert new_result.violations[0].approval_status is None
-
-    def test_expired_approval_does_not_match(self):
-        violations = (
-            Violation(rule_id="r1", rule_description="d", severity=Severity.BLOCK, message="m"),
-        )
-        result = _make_result(violations)
-        approval = _make_approval(["r1"], "feat/x", expires_at="2020-01-01T00:00:00+00:00")
-
-        new_result = apply_approvals(result, [approval], "feat/x")
-
-        assert new_result.passed is False
-        assert new_result.violations[0].approval_status == "pending"
 
     def test_summary_reflects_approval_state(self):
         violations = (
             Violation(rule_id="r1", rule_description="d", severity=Severity.BLOCK, message="m"),
             Violation(rule_id="r2", rule_description="d", severity=Severity.BLOCK, message="m"),
         )
-        result = _make_result(violations)
-        approval = _make_approval(["r1"], "feat/x")
-
-        new_result = apply_approvals(result, [approval], "feat/x")
-
+        new_result = apply_approvals(
+            _make_result(violations),
+            approved_rule_ids=frozenset({"r1"}),
+            reason="ok",
+        )
         assert "1 block(s) approved" in new_result.summary
         assert "1 block(s) pending" in new_result.summary

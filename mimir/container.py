@@ -98,12 +98,6 @@ class Container:
         from mimir.services.agent_policy import AgentPolicyService
         self.agent_policy = AgentPolicyService(impact_service=self.impact)
 
-        # Approval service
-        from mimir.services.approval import ApprovalService
-        self.approval = ApprovalService(
-            approvals_dir=config.data_dir.parent / ".mimir" / "approvals",
-        )
-
         self.temporal.set_quality_service(self.quality)
         self.retrieval.set_quality_service(self.quality)
         self.retrieval.set_temporal_service(self.temporal)

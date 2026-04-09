@@ -34,7 +34,7 @@ class Severity(Enum):
 
     WARNING = "warning"    # report but don't block
     ERROR = "error"        # block commit / fail CI
-    BLOCK = "block"        # block + require human approval
+    BLOCK = "block"        # block + require human approval (via HEAD commit trailer)
 
 
 # ---------------------------------------------------------------------------
@@ -116,15 +116,9 @@ class GuardrailResult:
     summary: str
     change_set: ChangeSet
     rules_evaluated: int
-    pending_approvals: tuple[str, ...] = ()  # rule_ids with unresolved BLOCK
-
-    @property
-    def has_pending_blocks(self) -> bool:
-        """True when there are BLOCK violations awaiting human approval."""
-        return len(self.pending_approvals) > 0
 
     def to_dict(self) -> dict[str, Any]:
-        d: dict[str, Any] = {
+        return {
             "passed": self.passed,
             "summary": self.summary,
             "rules_evaluated": self.rules_evaluated,
@@ -132,9 +126,6 @@ class GuardrailResult:
             "affected_files": list(self.change_set.affected_files),
             "modified_nodes": list(self.change_set.modified_nodes),
         }
-        if self.pending_approvals:
-            d["pending_approvals"] = list(self.pending_approvals)
-        return d
 
     def format_for_llm(self) -> str:
         """Render as structured text for LLM consumption."""

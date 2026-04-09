@@ -9,12 +9,10 @@ from __future__ import annotations
 import dataclasses
 import fnmatch
 import logging
-from datetime import datetime, timezone
 from typing import Optional
 
 import networkx as nx
 
-from mimir.domain.approvals import ApprovalRequest
 from mimir.domain.graph import CodeGraph
 from mimir.domain.guardrails import (
     ChangeSet,
@@ -404,15 +402,12 @@ class GuardrailService:
     ) -> list[Violation]:
         """Enforce file scope restrictions (bounded autonomy)."""
         path_pattern = rule.config["path_pattern"]
-        require_human = rule.config.get("require_human_approval", False)
 
         violations: list[Violation] = []
 
         for file_path in change.affected_files:
             if fnmatch.fnmatch(file_path, path_pattern):
                 msg = f"File {file_path} matches protected pattern '{path_pattern}'"
-                if require_human:
-                    msg += " — human approval required"
 
                 violations.append(Violation(
                     rule_id=rule.id,
@@ -432,33 +427,32 @@ class GuardrailService:
 
 def apply_approvals(
     result: GuardrailResult,
-    approvals: list[ApprovalRequest],
-    branch: str,
+    *,
+    approved_rule_ids: frozenset[str],
+    reason: str,
 ) -> GuardrailResult:
-    """Annotate BLOCK violations with approval status and return a new result.
+    """Annotate BLOCK violations with approval status from the HEAD trailer.
 
-    - Matched BLOCK violations get ``approval_status="approved"``
-    - Unmatched BLOCK violations get ``approval_status="pending"``
-    - Non-BLOCK violations are left untouched
-    - ``passed`` is recomputed: approved blocks no longer cause failure
+    The approval model is intentionally stateless: whatever the HEAD commit
+    of the branch declares via its ``Mimir-Approved:`` trailer is the
+    source of truth. Pushing a new commit that lacks the trailer
+    auto-invalidates the approval.
+
+    A BLOCK violation is ``approved`` iff its rule id is in
+    ``approved_rule_ids`` **and** ``reason`` is non-empty. There is no
+    self-approval guard — whoever commits the trailer is trusted.
     """
-    now = datetime.now(timezone.utc)
+    effective_approved = approved_rule_ids if reason else frozenset()
 
     new_violations: list[Violation] = []
-    pending_rule_ids: list[str] = []
+    pending_count = 0
 
     for v in result.violations:
         if v.severity != Severity.BLOCK:
             new_violations.append(v)
             continue
 
-        # Check if any approval covers this violation on this branch
-        matched = any(
-            a.is_valid_for(v.rule_id, branch, now)
-            for a in approvals
-        )
-
-        if matched:
+        if v.rule_id in effective_approved:
             new_violations.append(
                 dataclasses.replace(v, approval_status="approved")
             )
@@ -466,12 +460,11 @@ def apply_approvals(
             new_violations.append(
                 dataclasses.replace(v, approval_status="pending")
             )
-            pending_rule_ids.append(v.rule_id)
+            pending_count += 1
 
     # Recompute passed: errors still fail; only unapproved blocks fail
     has_errors = any(v.severity == Severity.ERROR for v in new_violations)
-    has_pending = len(pending_rule_ids) > 0
-    passed = not has_errors and not has_pending
+    passed = not has_errors and pending_count == 0
 
     # Build summary
     error_count = sum(1 for v in new_violations if v.severity == Severity.ERROR)
@@ -484,14 +477,12 @@ def apply_approvals(
     parts: list[str] = []
     if passed:
         parts.append("All checks passed")
-    elif has_pending and not has_errors:
-        parts.append("Pending approval")
     else:
         parts.append("Violations found")
     if error_count:
         parts.append(f"{error_count} error(s)")
-    if has_pending:
-        parts.append(f"{len(pending_rule_ids)} block(s) pending")
+    if pending_count:
+        parts.append(f"{pending_count} block(s) pending")
     if approved_count:
         parts.append(f"{approved_count} block(s) approved")
     if warning_count:
@@ -503,5 +494,4 @@ def apply_approvals(
         summary=". ".join(parts),
         change_set=result.change_set,
         rules_evaluated=result.rules_evaluated,
-        pending_approvals=tuple(dict.fromkeys(pending_rule_ids)),  # unique, ordered
     )

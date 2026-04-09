@@ -263,7 +263,7 @@ def guardrail_check(
     ),
     no_approvals: bool = typer.Option(
         False, "--no-approvals",
-        help="Skip approval matching (show raw violations)",
+        help="Ignore HEAD commit trailers (show raw BLOCK violations)",
     ),
     config: Path = typer.Option(_DEFAULT_CONFIG, "--config", "-c"),
     workspace: Optional[str] = typer.Option(None, "--workspace", "-w"),
@@ -277,15 +277,16 @@ def guardrail_check(
       - Unstaged changes (git diff)
       - Branch diff against --base (or auto-detected main/master)
 
-    Exit codes: 0 = passed, 1 = errors found, 2 = blocks pending approval.
+    BLOCK violations are cleared only when the HEAD commit carries a
+    matching ``Mimir-Approved:`` trailer. Exit codes: 0 = passed,
+    1 = errors or unapproved blocks.
     """
     _setup_logging(verbose)
-    import subprocess as _sp
 
-    from mimir.domain.guardrails_config import load_approval_config, load_rules
-    from mimir.services.approval import ApprovalService
+    from mimir.domain.guardrails_config import load_rules
     from mimir.services.guardrail import apply_approvals
     from mimir.services.guardrail_report import GuardrailReporter
+    from mimir.services.guardrail_trailers import read_head_approval
 
     # Load rules (fail-closed)
     try:
@@ -327,76 +328,35 @@ def guardrail_check(
     # Evaluate
     result = asyncio.run(container.guardrail.evaluate(graph, diff_text, rule_list))
 
-    # Detect current branch for approval matching
-    try:
-        current_branch = _sp.check_output(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"], text=True,
-        ).strip()
-    except Exception:
-        current_branch = ""
-
-    # Apply approvals unless skipped
-    auto_request_id: str | None = None
+    # Read approval trailer from HEAD and apply to BLOCK violations
     if not no_approvals:
-        approval_config = load_approval_config(rules)
-        approvals_dir = Path(approval_config.approvals_dir)
-        approval_svc = ApprovalService(approvals_dir)
-
-        block_rule_ids = {
-            v.rule_id for v in result.violations
-            if v.severity.value == "block"
-        }
-        if block_rule_ids:
-            matching = approval_svc.find_matching(
-                rule_ids=block_rule_ids, branch=current_branch,
+        block_present = any(
+            v.severity.value == "block" for v in result.violations
+        )
+        if block_present:
+            head_approval = read_head_approval()
+            if head_approval is None:
+                approved_ids: frozenset[str] = frozenset()
+                reason = ""
+            else:
+                approved_ids = head_approval.rule_ids
+                reason = head_approval.reason
+            result = apply_approvals(
+                result,
+                approved_rule_ids=approved_ids,
+                reason=reason,
             )
-            result = apply_approvals(result, matching, current_branch)
-
-            # Auto-create approval request for pending blocks
-            if result.has_pending_blocks:
-                try:
-                    requester = _sp.check_output(
-                        ["git", "config", "user.name"], text=True,
-                    ).strip()
-                except Exception:
-                    requester = "unknown"
-
-                affected = [
-                    line[6:] for line in diff_text.splitlines()
-                    if line.startswith("+++ b/")
-                ]
-
-                pending_ids_list = list(result.pending_approvals)
-                req = approval_svc.create_request(
-                    rule_ids=pending_ids_list,
-                    diff_text=diff_text,
-                    branch=current_branch,
-                    requested_by=requester,
-                    affected_files=affected,
-                    ttl_days=approval_config.default_ttl_days,
-                )
-                auto_request_id = req.id
 
     # Format output
-    pending_ids = tuple(result.pending_approvals) if result.has_pending_blocks else ()
     reporter = GuardrailReporter()
     if output == "json":
-        out_dict = result.to_dict()
-        if auto_request_id:
-            out_dict["approval_request_id"] = auto_request_id
-        formatted = json.dumps(out_dict, indent=2)
+        formatted = json.dumps(result.to_dict(), indent=2)
         console.print_json(formatted)
     elif output == "github-pr-comment":
-        # Don't pass auto_request_id — it's ephemeral in CI
-        formatted = reporter.format_github_pr_comment(
-            result, pending_rule_ids=pending_ids,
-        )
+        formatted = reporter.format_github_pr_comment(result)
         console.print(formatted)
     else:
-        formatted = reporter.format_text(
-            result, pending_rule_ids=pending_ids,
-            approval_request_id=auto_request_id,
-        )
+        formatted = reporter.format_text(result)
         console.print(formatted)
 
     # Write report file if requested
@@ -405,10 +365,6 @@ def guardrail_check(
         report_file.write_text(formatted + "\n", encoding="utf-8")
 
     if not result.passed:
-        if result.has_pending_blocks and not any(
-            v.severity.value == "error" for v in result.violations
-        ):
-            raise typer.Exit(2)
         raise typer.Exit(1)
 
 
@@ -479,262 +435,59 @@ def guardrail_test(
     console.print("[green]Rules syntax OK. Ready for guardrail checks.[/]")
 
 
-@guardrail_app.command("request")
-def guardrail_request(
-    rule_ids: str = typer.Option(
-        ..., "--rules",
-        help="Comma-separated rule IDs to request approval for",
+@guardrail_app.command("approve")
+def guardrail_approve(
+    rule_ids: list[str] = typer.Argument(
+        ..., help="Rule IDs to approve (space-separated)",
     ),
-    diff: str = typer.Option(
-        "", "--diff", "-d",
-        help="Path to diff file, '-' for stdin, or empty for auto-detect from git",
-    ),
-    base: str = typer.Option(
-        "", "--base", "-b",
-        help="Base ref for git diff (e.g. main, origin/main). Default: auto-detect",
-    ),
-    ttl: int = typer.Option(
-        0, "--ttl",
-        help="Approval TTL in days (0 = use default from config)",
-    ),
-    rules_file: Path = typer.Option(
-        Path("mimir-rules.yaml"), "--rules-file",
-        help="Path to rules YAML (for approval config)",
+    reason: str = typer.Option(
+        ..., "--reason",
+        help="Reason for approving (becomes the Mimir-Approved-Reason trailer)",
     ),
 ) -> None:
-    """Create an approval request for BLOCK violations.
+    """Approve BLOCK violations by committing an approval trailer on HEAD.
 
-    Run this locally, then approve and commit the approval file.
+    Creates an empty commit whose message carries ``Mimir-Approved:`` and
+    ``Mimir-Approved-Reason:`` trailers. The next ``mimir guardrail check``
+    run on this branch will clear the matching BLOCK violations.
+
+    Any subsequent commit that does not re-add the trailer automatically
+    invalidates the approval (HEAD has moved). There is no self-approval
+    guard — whoever commits the trailer is trusted; the audit trail is
+    the git log.
     """
     import subprocess
 
-    from mimir.domain.guardrails_config import load_approval_config
-    from mimir.services.approval import ApprovalService
+    if not reason.strip():
+        console.print("[red bold]--reason must not be empty[/]")
+        raise typer.Exit(1)
 
-    # Read diff
-    if diff == "-":
-        diff_text = sys.stdin.read()
-    elif diff:
-        diff_path = Path(diff)
-        if not diff_path.exists():
-            console.print(f"[red bold]Diff file not found:[/] {diff}")
-            raise typer.Exit(1)
-        diff_text = diff_path.read_text()
-    else:
-        diff_text = _git_auto_diff(base)
+    ids = [rid.strip() for rid in rule_ids if rid.strip()]
+    if not ids:
+        console.print("[red bold]At least one rule id is required[/]")
+        raise typer.Exit(1)
 
-    if not diff_text.strip():
-        console.print("[yellow]Empty diff — nothing to request approval for.[/]")
-        raise typer.Exit(0)
-
-    # Detect current branch
-    try:
-        current_branch = subprocess.check_output(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"], text=True,
-        ).strip()
-    except Exception:
-        current_branch = ""
-
-    # Resolve config
-    approval_config = load_approval_config(rules_file)
-    ttl_days = ttl if ttl > 0 else approval_config.default_ttl_days
-
-    # Determine requester
-    try:
-        requested_by = subprocess.check_output(
-            ["git", "config", "user.name"], text=True,
-        ).strip()
-    except Exception:
-        requested_by = "unknown"
-
-    # Parse affected files from diff (simple heuristic)
-    affected = []
-    for line in diff_text.splitlines():
-        if line.startswith("+++ b/"):
-            affected.append(line[6:])
-
-    ids = [r.strip() for r in rule_ids.split(",") if r.strip()]
-    approvals_dir = Path(approval_config.approvals_dir)
-    svc = ApprovalService(approvals_dir)
-
-    req = svc.create_request(
-        rule_ids=ids,
-        diff_text=diff_text,
-        branch=current_branch,
-        requested_by=requested_by,
-        affected_files=affected,
-        ttl_days=ttl_days,
+    subject = f"approval: {', '.join(ids)}"
+    body = (
+        f"{subject}\n"
+        "\n"
+        f"Mimir-Approved: {', '.join(ids)}\n"
+        f"Mimir-Approved-Reason: {reason.strip()}\n"
     )
 
-    console.print(f"[green]Created approval request:[/] {req.id}")
-    console.print(f"  Rules: {', '.join(req.rule_ids)}")
-    console.print(f"  Branch: {req.branch}")
-    console.print(f"  Expires: {req.expires_at}")
-    console.print(f"  File: {approvals_dir / f'{req.id}.yaml'}")
-    console.print("")
-    console.print("[bold]Next steps:[/]")
-    console.print(f"  1. Ask a reviewer to run: mimir guardrail approve {req.id} --reason \"...\"")
-    console.print(f"  2. git add {approvals_dir / f'{req.id}.yaml'}")
-    console.print("  3. Commit and push")
-
-
-@guardrail_app.command("approve")
-def guardrail_approve(
-    request_id: str = typer.Argument(..., help="Approval request ID (e.g. apr-a1b2c3d4)"),
-    reason: str = typer.Option(
-        ..., "--reason",
-        help="Reason for approving",
-    ),
-    approver: Optional[str] = typer.Option(
-        None, "--approver",
-        help="Approver identity (defaults to git user.name)",
-    ),
-    rules_file: Path = typer.Option(
-        Path("mimir-rules.yaml"), "--rules-file",
-        help="Path to rules YAML (for approvers list)",
-    ),
-) -> None:
-    """Approve a pending approval request."""
-    import subprocess
-
-    from mimir.domain.guardrails_config import load_approval_config
-    from mimir.services.approval import ApprovalService
-
-    approval_config = load_approval_config(rules_file)
-    approvals_dir = Path(approval_config.approvals_dir)
-    svc = ApprovalService(approvals_dir)
-
-    if approver is None:
-        try:
-            approver = subprocess.check_output(
-                ["git", "config", "user.name"], text=True,
-            ).strip()
-        except Exception:
-            console.print("[red bold]Cannot determine approver — use --approver[/]")
-            raise typer.Exit(1)
-
-    # Build allowed approvers list (global + per-rule)
-    approvers_allowed = list(approval_config.approvers) if approval_config.approvers else None
-
     try:
-        req = svc.approve(
-            request_id,
-            approved_by=approver,
-            reason=reason,
-            approvers_allowed=approvers_allowed,
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", body],
+            check=True,
         )
-    except Exception as exc:
-        console.print(f"[red bold]Approval failed:[/] {exc}")
+    except subprocess.CalledProcessError as exc:
+        console.print(f"[red bold]git commit failed:[/] {exc}")
         raise typer.Exit(1) from exc
 
-    console.print(f"[green]Approved:[/] {req.id}")
-    console.print(f"  By: {req.approved_by}")
-    console.print(f"  Reason: {req.reason}")
-    console.print(f"  Expires: {req.expires_at}")
+    console.print(f"[green]Approval commit created for:[/] {', '.join(ids)}")
+    console.print(f"  Reason: {reason}")
     console.print("")
-    console.print(f"[bold]Don't forget to commit:[/] git add {approvals_dir / f'{req.id}.yaml'}")
-
-
-@guardrail_app.command("revoke")
-def guardrail_revoke(
-    request_id: str = typer.Argument(..., help="Approval request ID"),
-) -> None:
-    """Revoke an approval request."""
-    import subprocess
-
-    from mimir.domain.guardrails_config import load_approval_config
-    from mimir.services.approval import ApprovalService
-
-    approval_config = load_approval_config(Path("mimir-rules.yaml"))
-    svc = ApprovalService(Path(approval_config.approvals_dir))
-
-    try:
-        revoked_by = subprocess.check_output(
-            ["git", "config", "user.name"], text=True,
-        ).strip()
-    except Exception:
-        revoked_by = "unknown"
-
-    try:
-        req = svc.revoke(request_id, revoked_by=revoked_by)
-    except Exception as exc:
-        console.print(f"[red bold]Revoke failed:[/] {exc}")
-        raise typer.Exit(1) from exc
-
-    console.print(f"[green]Revoked:[/] {req.id}")
-
-
-@guardrail_app.command("status")
-def guardrail_status(
-    rules_file: Path = typer.Option(
-        Path("mimir-rules.yaml"), "--rules-file",
-        help="Path to rules YAML (for approval config)",
-    ),
-) -> None:
-    """List all approval requests and their status."""
-    from mimir.domain.guardrails_config import load_approval_config
-    from mimir.services.approval import ApprovalService
-
-    approval_config = load_approval_config(rules_file)
-    svc = ApprovalService(Path(approval_config.approvals_dir))
-
-    requests = svc.list_all()
-    if not requests:
-        console.print("[yellow]No approval requests found.[/]")
-        return
-
-    table = Table(title="Approval Requests")
-    table.add_column("ID", style="bold")
-    table.add_column("Rules")
-    table.add_column("Branch")
-    table.add_column("Status")
-    table.add_column("Requested By")
-    table.add_column("Expires")
-
-    status_styles = {
-        "pending": "[yellow]pending[/yellow]",
-        "approved": "[green]approved[/green]",
-        "revoked": "[red]revoked[/red]",
-        "expired": "[dim]expired[/dim]",
-    }
-
-    for req in requests:
-        table.add_row(
-            req.id,
-            ", ".join(req.rule_ids),
-            req.branch or "-",
-            status_styles.get(req.status.value, req.status.value),
-            req.requested_by,
-            req.expires_at or "-",
-        )
-
-    console.print(table)
-
-
-@guardrail_app.command("clean")
-def guardrail_clean(
-    dry_run: bool = typer.Option(False, "--dry-run", help="List files that would be removed"),
-    rules_file: Path = typer.Option(
-        Path("mimir-rules.yaml"), "--rules-file",
-        help="Path to rules YAML (for approval config)",
-    ),
-) -> None:
-    """Remove expired and revoked approval files."""
-    from mimir.domain.guardrails_config import load_approval_config
-    from mimir.services.approval import ApprovalService
-
-    approval_config = load_approval_config(rules_file)
-    svc = ApprovalService(Path(approval_config.approvals_dir))
-
-    removed = svc.clean_expired(dry_run=dry_run)
-    if not removed:
-        console.print("[green]No expired or revoked approvals to clean.[/]")
-        return
-
-    action = "Would remove" if dry_run else "Removed"
-    for rid in removed:
-        console.print(f"  {action}: {rid}")
-    console.print(f"\n[bold]{action} {len(removed)} approval file(s).[/]")
+    console.print("[bold]Don't forget to push:[/] git push")
 
 
 # ------------------------------------------------------------------

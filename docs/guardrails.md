@@ -82,80 +82,63 @@ rules:
     severity: block
     config:
       path_pattern: "*/auth/**"
-      require_human_approval: true
 ```
 
-Severity levels: `warning` (report only), `error` (block commit), `block` (require human approval).
+Severity levels: `warning` (report only), `error` (fail CI), `block` (fail CI unless the HEAD commit carries a matching approval trailer).
 
 ## Approval Workflow
 
-When a `block` severity rule fires, the pipeline exits with code **2** (pending approval) instead of code 1 (error). Approvals are **git-native YAML files** stored in `.mimir/approvals/` — platform-agnostic, auditable via `git log`.
+BLOCK-severity rules are cleared by a single mechanism: a trailer on the **HEAD commit** of the branch being checked. There is no persisted approval registry — approvals are stateless, branch-local, and auto-invalidated whenever HEAD moves.
 
-### Configuration
+### Trailer format
 
-Add an `approval_config` section to `mimir-rules.yaml`:
+```
+approval: protect-container, protect-ci
 
-```yaml
-approval_config:
-  default_ttl_days: 7           # approval expires after 7 days
-  approvers: [alice, bob]       # authorized approvers (git user.name)
-  approvals_dir: ".mimir/approvals"
+Mimir-Approved: protect-container, protect-ci
+Mimir-Approved-Reason: legal signoff ticket #4821
 ```
 
-Per-rule overrides are supported in `file_scope_ban` configs:
-
-```yaml
-- id: protect-auth
-  type: file_scope_ban
-  severity: block
-  config:
-    path_pattern: "*/auth/**"
-    require_human_approval: true
-    approvers: [security-lead]   # per-rule override
-    ttl_days: 3                  # per-rule TTL
-```
+`Mimir-Approved:` may list multiple comma-separated rule ids (or repeat on multiple lines). `Mimir-Approved-Reason:` must be non-empty; a missing reason voids the approval.
 
 ### Workflow
 
 ```bash
 # 1. CI or local check finds BLOCK violations
 mimir guardrail check --base main
-# → exit code 2 (pending approval)
-# → Reports: rule IDs and instructions
+# → exit 1, PR comment lists the failing rule ids
 
-# 2. Developer creates approval request locally
-mimir guardrail request --rules protect-auth
+# 2. Someone runs approve on the PR branch — this creates an empty
+#    commit with the Mimir-Approved trailer on HEAD
+mimir guardrail approve protect-auth --reason "Reviewed auth changes"
 
-# 3. Reviewer approves
-mimir guardrail approve apr-a1b2c3d4 --reason "Reviewed auth changes"
-
-# 4. Commit and push the approval file
-git add .mimir/approvals/apr-a1b2c3d4.yaml
-git commit -m "Add guardrail approval for auth changes"
+# 3. Push the approval commit
 git push
 
-# 5. CI re-runs → approval matches → passes (exit code 0)
+# 4. CI re-runs → HEAD trailer matches → exit 0
 ```
 
-Approvals are matched by **rule ID + branch name** — no fragile diff-hash binding. The `diff_hash` is still stored in the YAML file for audit purposes.
+There is no self-approval guard. Whoever commits the trailer is trusted; the audit trail lives in `git log`.
+
+### Invalidation
+
+Any new commit on the branch that does not re-declare the trailer automatically removes the approval (HEAD has moved, the new HEAD has no trailer). There is no `revoke` command — push a new commit.
 
 ### CLI Commands
 
 | Command | Description |
 |---|---|
-| `mimir guardrail request --rules <ids>` | Create an approval request for BLOCK violations |
-| `mimir guardrail approve <id> --reason "..."` | Grant approval |
-| `mimir guardrail revoke <id>` | Revoke an approval |
-| `mimir guardrail status` | List all approval requests |
-| `mimir guardrail clean` | Remove expired/revoked approvals |
+| `mimir guardrail check` | Evaluate rules and read HEAD trailers |
+| `mimir guardrail approve <rule-ids...> --reason "..."` | Create an approval commit carrying the trailer |
+| `mimir guardrail init` | Generate example rules + agent policy |
+| `mimir guardrail test` | Dry-run: validate rule syntax |
 
 ### Key Properties
 
-- **Branch-scoped matching**: Approvals are matched by rule ID + branch name, making them stable across environments.
-- **TTL expiry**: Approvals expire after a configurable number of days (default 7).
-- **Exit codes**: `0` = passed, `1` = errors, `2` = blocks pending approval.
-- **CI behavior**: Pending approvals emit a warning but don't fail CI by default. Set `MIMIR_FAIL_ON_PENDING=true` to enforce.
-- **`--no-approvals` flag**: Skip approval matching on `guardrail check` to see raw violations.
+- **Stateless**: no `.mimir/approvals/` directory, no TTL, no registry.
+- **Auto-invalidated**: pushing a new commit without the trailer wipes the approval.
+- **Exit codes**: `0` = passed, `1` = errors or unapproved BLOCKs.
+- **`--no-approvals` flag**: skip trailer parsing on `guardrail check` to see raw BLOCK violations.
 
 ## Agent Policy (`mimir-agent-policy.yaml`)
 

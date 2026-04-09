@@ -20,7 +20,7 @@ build/
 dist/
 *.egg-info/
 
-# Mimir — personal & derived data (graph.db + approvals/ are tracked)
+# Mimir — personal & derived data (graph.db is tracked)
 .mimir/sessions.db
 .mimir/models/
 .mimir/chroma/

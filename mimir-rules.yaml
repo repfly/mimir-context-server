@@ -1,11 +1,15 @@
 # ---------------------------------------------------------------------------
-# Approval workflow configuration
+# Guardrail rules
+#
+# BLOCK-severity rules require a human approval to pass. Approvals live
+# entirely in the HEAD commit's message via trailers:
+#
+#     Mimir-Approved: <rule-id>[, <rule-id>...]
+#     Mimir-Approved-Reason: <why>
+#
+# Any new commit without the trailer invalidates the approval — the
+# source of truth is the HEAD commit, nothing else.
 # ---------------------------------------------------------------------------
-approval_config:
-  default_ttl_days: 7
-  approvers: []              # global approver list (git user.name values)
-  approvals_dir: ".mimir/approvals"
-
 rules:
   # ===================================================================
   # HEXAGONAL LAYER ENFORCEMENT
@@ -225,7 +229,6 @@ rules:
     severity: block
     config:
       path_pattern: "*/container.py"
-      require_human_approval: true
 
   # Port interfaces define the system's boundaries
   - id: protect-ports
@@ -234,7 +237,6 @@ rules:
     severity: block
     config:
       path_pattern: "*/ports/*"
-      require_human_approval: true
 
   # Config schema changes can break all deployments
   - id: protect-config-schema
@@ -243,7 +245,6 @@ rules:
     severity: block
     config:
       path_pattern: "*/domain/config.py"
-      require_human_approval: true
 
   # CI/CD and Docker changes affect the entire pipeline
   - id: protect-ci
@@ -252,7 +253,6 @@ rules:
     severity: block
     config:
       path_pattern: "*/.github/*"
-      require_human_approval: true
 
   - id: protect-docker
     type: file_scope_ban
@@ -260,4 +260,3 @@ rules:
     severity: block
     config:
       path_pattern: "*/Dockerfile"
-      require_human_approval: true

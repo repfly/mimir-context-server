@@ -12,8 +12,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Install for development
 pip install -e ".[dev]"
 
-# Run tests
-pytest
+# Run tests (the venv lives at ./.venv — activate it or call it directly)
+.venv/bin/pytest
+# or: source .venv/bin/activate && pytest
 
 # CLI usage
 mimir init              # Create mimir.toml config
@@ -30,13 +31,34 @@ mimir guardrail check --base main                        # Diff against specific
 mimir guardrail check --diff - --rules mimir-rules.yaml  # Validate diff (stdin)
 mimir guardrail test    # Dry-run: validate rule syntax
 
-# Guardrail Approvals (exit code 2 = pending approval)
-mimir guardrail request --rules <rule-ids>              # Create approval request
-mimir guardrail approve <request-id> --reason "..."     # Grant approval
-mimir guardrail revoke <request-id>                     # Revoke approval
-mimir guardrail status                                  # List approvals
-mimir guardrail clean                                   # Remove expired approvals
+# Guardrail Approvals (HEAD-commit trailer model)
+mimir guardrail approve <rule-ids...> --reason "..."    # Add Mimir-Approved trailer via empty commit
 ```
+
+## Guardrail Approvals
+
+BLOCK-severity rules require a human approval to pass. Approvals are stateless:
+they live entirely in the HEAD commit's message as trailers. There is no
+`.mimir/approvals/` directory, no registry, no TTL.
+
+```
+Mimir-Approved: protect-container, protect-ci
+Mimir-Approved-Reason: legal signoff ticket #4821
+```
+
+Workflow:
+
+1. CI fails on a BLOCK violation. PR comment lists the failing rule ids.
+2. Someone runs `mimir guardrail approve <rule-ids> --reason "..."` on the
+   PR branch. This creates an empty commit with the trailer.
+3. Push. CI re-runs, reads HEAD trailers, clears the matching BLOCKs.
+4. Any subsequent commit without the trailer invalidates the approval because
+   HEAD has moved. No `revoke` command is needed.
+
+`apply_approvals()` in `mimir/services/guardrail.py` accepts the approval
+whenever the rule id is listed in the trailer and `Mimir-Approved-Reason`
+is non-empty. There is no self-approval guard — whoever commits the
+trailer is trusted; the audit trail lives in `git log`.
 
 ## Architecture
 
@@ -83,7 +105,7 @@ Guardrails config: `mimir-rules.yaml` (architectural rules) and `mimir-agent-pol
 
 ## Storage
 
-Default location: `.mimir/`. Tracked in git: `graph.db` (code graph) and `approvals/` (guardrail approvals). Ignored: `sessions.db` (personal), `models/` (downloaded embeddings), `chroma/` (derived). Run `mimir index` and commit `graph.db` after significant code changes.
+Default location: `.mimir/`. Tracked in git: `graph.db` (code graph). Ignored: `sessions.db` (personal), `models/` (downloaded embeddings), `chroma/` (derived). Run `mimir index` and commit `graph.db` after significant code changes.
 
 ## Docker
 

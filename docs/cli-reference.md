@@ -19,6 +19,9 @@ mimir vacuum                Compact the SQLite database
 mimir guardrail check       Validate a diff against architectural rules
 mimir guardrail init        Generate example rules + agent policy files
 mimir guardrail test        Dry-run: validate rule syntax against current graph
+mimir guardrail approve <rule-ids...> --reason "..."
+                            Create an empty commit carrying a Mimir-Approved
+                            trailer on HEAD to clear matching BLOCK violations
 mimir workspace             Manage named workspaces
 
 Index flags:
