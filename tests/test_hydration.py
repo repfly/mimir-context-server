@@ -160,6 +160,35 @@ def test_hydrate_preserves_input_order_in_delta() -> None:
     assert call["ids"] == ["myrepo:a", "myrepo:c", "myrepo:d"]
 
 
+def test_hydrate_api_endpoint_includes_route_metadata() -> None:
+    graph = CodeGraph()
+    graph.add_node(Node(
+        id="myrepo:",
+        repo="myrepo",
+        kind=NodeKind.REPOSITORY,
+        name="myrepo",
+    ))
+    graph.add_node(Node(
+        id="myrepo:app.py::create_order",
+        repo="myrepo",
+        kind=NodeKind.API_ENDPOINT,
+        name="create_order",
+        path="app.py",
+        raw_code='@app.post("/orders")\ndef create_order(): pass',
+        http_method="POST",
+        route_path="/orders",
+        embedding=[1.0, 0.0, 0.0, 0.0],
+    ))
+    stub = RecordingVectorStore(preloaded_ids=set())
+
+    _hydrate(stub, graph)
+
+    assert len(stub.upsert_calls) == 1
+    meta = stub.upsert_calls[0]["metadatas"][0]
+    assert meta["http_method"] == "POST"
+    assert meta["route_path"] == "/orders"
+
+
 def test_hydrate_no_embedded_nodes_is_noop() -> None:
     graph = CodeGraph()
     graph.add_node(Node(

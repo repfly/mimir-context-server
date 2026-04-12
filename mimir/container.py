@@ -56,13 +56,6 @@ class Container:
             graph_store=self.graph_store,
         )
 
-        from mimir.services.retrieval import RetrievalService
-        self.retrieval = RetrievalService(
-            config=config,
-            embedder=self.embedder,
-            vector_store=self.vector_store,
-        )
-
         from mimir.services.temporal import TemporalService
         self.temporal = TemporalService(config=config)
 
@@ -80,6 +73,16 @@ class Container:
 
         from mimir.services.quality import QualityService
         self.quality = QualityService()
+
+        from mimir.services.retrieval import RetrievalService
+        self.retrieval = RetrievalService(
+            config=config,
+            embedder=self.embedder,
+            vector_store=self.vector_store,
+            quality_service=self.quality,
+            temporal_service=self.temporal,
+            graph_store=self.graph_store,
+        )
 
         from mimir.services.catalog import CatalogService
         self.catalog = CatalogService(quality_service=self.quality, config=config)
@@ -99,9 +102,6 @@ class Container:
         self.agent_policy = AgentPolicyService(impact_service=self.impact)
 
         self.temporal.set_quality_service(self.quality)
-        self.retrieval.set_quality_service(self.quality)
-        self.retrieval.set_temporal_service(self.temporal)
-        self.retrieval.set_graph_store(self.graph_store)
 
     def _build_embedder(self):
         model = self.config.embeddings.model
@@ -183,6 +183,8 @@ class Container:
                     "kind": node.kind.value,
                     "path": node.path or "",
                     "last_modified": node.last_modified or "",
+                    "http_method": node.http_method or "",
+                    "route_path": node.route_path or "",
                 })
                 documents.append(IndexingService._embedding_text(node, graph))
 

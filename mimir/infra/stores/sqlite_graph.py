@@ -78,9 +78,20 @@ class SqliteGraphStore:
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
+            self._ensure_columns()
         except sqlite3.Error as exc:
             raise StorageError(f"Failed to initialise graph store at {db_path}: {exc}") from exc
         logger.info("Graph store initialised at %s", db_path)
+
+    def _ensure_columns(self) -> None:
+        """Add columns introduced after the initial schema."""
+        cur = self._conn.execute("PRAGMA table_info(nodes)")
+        existing = {row[1] for row in cur.fetchall()}
+        for col, defn in [("http_method", "TEXT"), ("route_path", "TEXT")]:
+            if col not in existing:
+                self._conn.execute(f"ALTER TABLE nodes ADD COLUMN {col} {defn}")
+                logger.info("Migrated nodes table: added column %s", col)
+        self._conn.commit()
 
     def save(self, graph: CodeGraph) -> None:
         """Persist the entire graph (full overwrite)."""
@@ -98,11 +109,17 @@ class SqliteGraphStore:
                     n.last_modified, n.modification_count,
                     n.last_retrieved, n.retrieval_count,
                     json.dumps(n.co_retrieved_with),
+                    n.http_method, n.route_path,
                 )
                 for n in graph.all_nodes()
             ]
             cur.executemany(
-                "INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO nodes (id, repo, kind, name, path,"
+                " start_line, end_line, summary, raw_code,"
+                " signature, docstring, last_modified, modification_count,"
+                " last_retrieved, retrieval_count, co_retrieved_with,"
+                " http_method, route_path)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 node_rows,
             )
 
@@ -153,11 +170,17 @@ class SqliteGraphStore:
                     n.last_modified, n.modification_count,
                     n.last_retrieved, n.retrieval_count,
                     json.dumps(n.co_retrieved_with),
+                    n.http_method, n.route_path,
                 )
                 for n in nodes
             ]
             cur.executemany(
-                "INSERT OR REPLACE INTO nodes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO nodes (id, repo, kind, name, path,"
+                " start_line, end_line, summary, raw_code,"
+                " signature, docstring, last_modified, modification_count,"
+                " last_retrieved, retrieval_count, co_retrieved_with,"
+                " http_method, route_path)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 node_rows,
             )
 
@@ -221,6 +244,8 @@ class SqliteGraphStore:
                     last_retrieved=data.get("last_retrieved"),
                     retrieval_count=data.get("retrieval_count", 0),
                     co_retrieved_with=json.loads(co_ret) if co_ret else {},
+                    http_method=data.get("http_method"),
+                    route_path=data.get("route_path"),
                 )
                 graph.add_node(node)
 

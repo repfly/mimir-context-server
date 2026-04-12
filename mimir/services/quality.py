@@ -40,6 +40,7 @@ _EXPECTED_EDGES: dict[NodeKind, set[EdgeKind]] = {
     NodeKind.CLASS: set(),  # evaluated dynamically
     NodeKind.TYPE: set(),
     NodeKind.MODULE: {EdgeKind.CONTAINS},
+    NodeKind.API_ENDPOINT: set(),
 }
 
 # Patterns that identify classes which naturally lack CONTAINS edges.
