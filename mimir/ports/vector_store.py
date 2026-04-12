@@ -72,6 +72,16 @@ class VectorStore(Protocol):
         """Remove vectors by ID."""
         ...
 
+    def get_existing_ids(self, ids: list[str]) -> set[str]:
+        """Return the subset of ``ids`` that already exist in the store.
+
+        Used by the container's hydration path to skip re-upserting vectors
+        that persistent backends (e.g. Chroma) already hold on disk.
+        Implementations should probe only the given ids, not scan the whole
+        store.
+        """
+        ...
+
     def count(self) -> int:
         """Return the total number of stored vectors."""
         ...

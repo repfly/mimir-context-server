@@ -1,6 +1,6 @@
 """Workspace registry — maps workspace names to config file paths.
 
-The registry lives at ``~/.treedex/workspaces.toml`` and is managed by the
+The registry lives at ``~/.mimir/workspaces.toml`` and is managed by the
 ``mimir workspace`` CLI sub-commands.  It is read-only at runtime; the MCP
 server or any other command only resolves a name → path, never writes.
 """

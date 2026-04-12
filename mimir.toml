@@ -21,7 +21,7 @@ model = "all-mpnet-base-v2"
 batch_size = 64
 
 [vector_db]
-backend = "numpy"
+backend = "chroma"
 
 [retrieval]
 default_beam_width = 3
