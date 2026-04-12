@@ -72,15 +72,18 @@ class EmbeddingConfig:
     api_key_env: Optional[str] = None
     batch_size: int = 64
     cache_dir: Optional[str] = None
+    max_concurrent_batches: int = 1
 
     def __post_init__(self) -> None:
         if self.batch_size <= 0:
             raise ConfigError("embedding batch_size must be positive")
+        if self.max_concurrent_batches < 1:
+            raise ConfigError("embedding max_concurrent_batches must be >= 1")
 
 
 @dataclass(frozen=True)
 class VectorDbConfig:
-    backend: Literal["chroma", "numpy"] = "numpy"
+    backend: Literal["chroma", "numpy"] = "chroma"
     persist_directory: Optional[str] = None
 
 

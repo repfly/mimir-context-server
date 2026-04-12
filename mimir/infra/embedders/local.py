@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Optional
@@ -69,7 +70,14 @@ class LocalEmbedder:
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
         self._ensure_model()
         try:
-            embeddings = self._model.encode(texts, show_progress_bar=False)  # type: ignore[union-attr]
+            # sentence-transformers' encode() is synchronous and CPU/GPU bound.
+            # Offload to a worker thread so callers (HTTP/MCP handlers running
+            # on the same loop) stay responsive during indexing.
+            embeddings = await asyncio.to_thread(
+                self._model.encode,  # type: ignore[union-attr]
+                texts,
+                show_progress_bar=False,
+            )
             return [emb.tolist() for emb in embeddings]
         except Exception as exc:
             raise EmbeddingError(f"Local embedding failed: {exc}") from exc

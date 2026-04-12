@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 class ChromaVectorStore:
     """ChromaDB vector store with HNSW indexing and metadata filtering."""
 
-    def __init__(self, persist_directory: Optional[str] = None, collection_name: str = "treedex") -> None:
+    def __init__(self, persist_directory: Optional[str] = None, collection_name: str = "mimir") -> None:
         try:
             import chromadb
         except ImportError:
@@ -98,6 +98,17 @@ class ChromaVectorStore:
             self._collection.delete(ids=ids)
         except Exception as exc:
             raise StorageError(f"ChromaDB delete failed: {exc}") from exc
+
+    def get_existing_ids(self, ids: list[str]) -> set[str]:
+        if not ids:
+            return set()
+        try:
+            # include=[] skips embeddings/metadata/documents — we only need the ids back.
+            result = self._collection.get(ids=ids, include=[])
+            existing = result.get("ids") if isinstance(result, dict) else None
+            return set(existing) if existing else set()
+        except Exception as exc:
+            raise StorageError(f"ChromaDB get_existing_ids failed: {exc}") from exc
 
     def count(self) -> int:
         return self._collection.count()

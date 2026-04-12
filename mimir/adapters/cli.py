@@ -1152,7 +1152,7 @@ max_file_size_kb = 500
 model = "local:all-MiniLM-L6-v2"
 
 [vector_db]
-backend = "numpy"
+backend = "chroma"
 
 [retrieval]
 default_beam_width = 3

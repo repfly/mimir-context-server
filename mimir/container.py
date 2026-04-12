@@ -159,7 +159,14 @@ class Container:
         return self._graph
 
     def _hydrate_vector_store(self, graph) -> None:
-        """Populate the in-memory vector store from graph node embeddings."""
+        """Populate the vector store from graph node embeddings.
+
+        Upserts only the delta: ids present in the graph but missing from the
+        store.  Persistent backends (Chroma) that already hold the HNSW index
+        on disk skip the work entirely on warm starts.  ``upsert`` is
+        idempotent in every backend, so the delta optimization is purely a
+        speedup — correctness does not depend on it.
+        """
         from mimir.services.indexing import IndexingService
 
         ids: list[str] = []
@@ -179,12 +186,28 @@ class Container:
                 })
                 documents.append(IndexingService._embedding_text(node, graph))
 
-        if ids:
-            self.vector_store.upsert(
-                ids=ids, embeddings=embeddings,
-                metadatas=metadatas, documents=documents,
+        if not ids:
+            return
+
+        existing = self.vector_store.get_existing_ids(ids)
+        if len(existing) == len(ids):
+            logger.info(
+                "Vector store up to date (%d embeddings) — skipping hydrate", len(ids),
             )
-            logger.info("Hydrated vector store with %d embeddings", len(ids))
+            return
+
+        missing_indices = [i for i, vec_id in enumerate(ids) if vec_id not in existing]
+        self.vector_store.upsert(
+            ids=[ids[i] for i in missing_indices],
+            embeddings=[embeddings[i] for i in missing_indices],
+            metadatas=[metadatas[i] for i in missing_indices],
+            documents=[documents[i] for i in missing_indices],
+        )
+        logger.info(
+            "Hydrated vector store with %d new embeddings (%d already present)",
+            len(missing_indices),
+            len(existing),
+        )
 
     def clear_data(self, *, graph: bool = True, sessions: bool = True) -> dict:
         """Delete all locally stored data.

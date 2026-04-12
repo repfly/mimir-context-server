@@ -6,12 +6,13 @@ It receives all infrastructure dependencies via constructor injection.
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from mimir.domain.config import MimirConfig
 from mimir.domain.errors import ParsingError
@@ -1254,6 +1255,40 @@ class IndexingService:
 
         return "\n".join(parts) if parts else node.name
 
+    async def _embed_texts_batched(
+        self,
+        texts: list[str],
+        on_batch_done: Optional[Callable[[], None]] = None,
+    ) -> list[list[float]]:
+        """Embed ``texts`` in batches with bounded concurrency.
+
+        Batches are dispatched via ``asyncio.gather`` and capped by a
+        semaphore of size ``embeddings.max_concurrent_batches``.  Input order
+        is preserved in the returned list (``gather`` returns results in
+        submission order).
+
+        ``on_batch_done`` is called once per completed batch and can be used
+        by callers (e.g. ``_embed_graph``) to drive a progress bar.
+        """
+        batch_size = self._config.embeddings.batch_size
+        max_concurrent = max(1, self._config.embeddings.max_concurrent_batches)
+        sem = asyncio.Semaphore(max_concurrent)
+
+        async def run_batch(chunk: list[str]) -> list[list[float]]:
+            async with sem:
+                result = await self._embedder.embed_batch(chunk)
+            if on_batch_done is not None:
+                on_batch_done()
+            return result
+
+        chunks = [texts[i : i + batch_size] for i in range(0, len(texts), batch_size)]
+        results = await asyncio.gather(*(run_batch(chunk) for chunk in chunks))
+
+        flat: list[list[float]] = []
+        for r in results:
+            flat.extend(r)
+        return flat
+
     async def _embed_graph(self, graph: CodeGraph, mode: str) -> None:
         """Embed all nodes and upsert into vector store."""
         from mimir.domain.models import SYMBOL_KINDS
@@ -1277,9 +1312,8 @@ class IndexingService:
 
         logger.info("Embedding %d nodes...", len(texts))
 
-        # Batch embed
+        # Batch embed (parallel-bounded via _embed_texts_batched)
         batch_size = self._config.embeddings.batch_size
-        all_embeddings: list[list[float]] = []
         total_batches = (len(texts) + batch_size - 1) // batch_size
 
         with Progress(
@@ -1291,12 +1325,10 @@ class IndexingService:
             transient=True,
         ) as progress:
             task_id = progress.add_task("[green]Embedding nodes...", total=total_batches)
-            
-            for i in range(0, len(texts), batch_size):
-                batch = texts[i : i + batch_size]
-                embeddings = await self._embedder.embed_batch(batch)
-                all_embeddings.extend(embeddings)
-                progress.update(task_id, advance=1)
+            all_embeddings = await self._embed_texts_batched(
+                texts,
+                on_batch_done=lambda: progress.update(task_id, advance=1),
+            )
 
         # Assign to nodes and upsert to vector store
         ids: list[str] = []
@@ -1342,13 +1374,7 @@ class IndexingService:
 
         logger.info("Embedding %d changed nodes...", len(texts))
 
-        batch_size = self._config.embeddings.batch_size
-        all_embeddings: list[list[float]] = []
-
-        for i in range(0, len(texts), batch_size):
-            batch_texts = texts[i : i + batch_size]
-            embeddings = await self._embedder.embed_batch(batch_texts)
-            all_embeddings.extend(embeddings)
+        all_embeddings = await self._embed_texts_batched(texts)
 
         ids: list[str] = []
         metadatas: list[dict] = []
