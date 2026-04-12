@@ -40,6 +40,7 @@ SYMBOL_KINDS: frozenset[NodeKind] = frozenset({
     NodeKind.CLASS,
     NodeKind.TYPE,
     NodeKind.CONSTANT,
+    NodeKind.API_ENDPOINT,
 })
 
 #: Kinds that represent structural containers (hierarchy embedding targets).
@@ -136,6 +137,10 @@ class Node:
     signature: Optional[str] = None
     docstring: Optional[str] = None
 
+    # API endpoint metadata
+    http_method: Optional[str] = None
+    route_path: Optional[str] = None
+
     # Embedding (stored separately in vector store, cached here for speed)
     embedding: Optional[list[float]] = None
 
@@ -182,6 +187,8 @@ class Node:
             "raw_code": self.raw_code,
             "signature": self.signature,
             "docstring": self.docstring,
+            "http_method": self.http_method,
+            "route_path": self.route_path,
             "last_modified": self.last_modified,
             "modification_count": self.modification_count,
             "last_retrieved": self.last_retrieved,
