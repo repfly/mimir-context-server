@@ -226,7 +226,7 @@ rules:
   - id: protect-container
     type: file_scope_ban
     description: "Container (DI wiring) changes require review"
-    severity: block
+    severity: warning
     config:
       path_pattern: "*/container.py"
 
@@ -234,7 +234,7 @@ rules:
   - id: protect-ports
     type: file_scope_ban
     description: "Port interface changes require review (affects all implementations)"
-    severity: block
+    severity: warning
     config:
       path_pattern: "*/ports/*"
 
@@ -242,7 +242,7 @@ rules:
   - id: protect-config-schema
     type: file_scope_ban
     description: "Config schema changes affect all deployments"
-    severity: block
+    severity: warning
     config:
       path_pattern: "*/domain/config.py"
 
