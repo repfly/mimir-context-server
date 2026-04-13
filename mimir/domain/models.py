@@ -157,9 +157,15 @@ class Node:
 
     @property
     def token_estimate(self) -> int:
-        """Rough token count: ~4 chars per token for code."""
+        """Rough token count: ~4 chars per token for code.
+
+        Includes a fixed overhead for formatting added by
+        ``ContextBundle.format_for_llm`` (code fences, location
+        header, annotation lines, separators).
+        """
         text = self.raw_code or self.summary or ""
-        return max(1, len(text) // 4)
+        _FORMAT_OVERHEAD_TOKENS = 15
+        return max(1, len(text) // 4) + _FORMAT_OVERHEAD_TOKENS
 
     @property
     def has_code(self) -> bool:

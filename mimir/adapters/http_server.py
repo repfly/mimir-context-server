@@ -104,6 +104,9 @@ def run_http_server(
                 container.session.session_dedup(
                     sg, session, query_embedding=bundle.query_embedding,
                 )
+                # Re-fit to budget after dedup may have changed node set
+                effective_budget = budget or container.retrieval._config.retrieval.default_token_budget
+                container.retrieval._fit_to_budget(sg, effective_budget, seed_ids=set())
                 bundle.nodes = list(sg.nodes.values())
                 bundle.edges = sg.edges
                 bundle.token_count = sg.token_estimate
