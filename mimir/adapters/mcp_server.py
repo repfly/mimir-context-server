@@ -328,6 +328,10 @@ def run_mcp_server(config: MimirConfig, workspace_name: str | None = None) -> No
                             sg, session, query_embedding=bundle.query_embedding,
                         )
 
+                        # Re-fit to budget after dedup may have changed node set
+                        effective_budget = tool_args.get("budget") or container.retrieval._config.retrieval.default_token_budget
+                        container.retrieval._fit_to_budget(sg, effective_budget, seed_ids=set())
+
                         # Apply deduplication back to the bundle
                         bundle.nodes = list(sg.nodes.values())
                         bundle.edges = sg.edges

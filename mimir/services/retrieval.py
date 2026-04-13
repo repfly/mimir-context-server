@@ -160,6 +160,21 @@ class RetrievalService:
                     seed_ids_so_far.add(node.id)
             seeds.sort(key=lambda x: x[1], reverse=True)
 
+        # Step 2e: Trim seeds to fit within token budget
+        # Seeds are sorted by score (descending). Keep only the top seeds
+        # whose cumulative token cost stays under the budget, reserving
+        # room for expansion context.
+        seed_budget = int(budget * 0.75)  # reserve 25% for expanded neighbours
+        trimmed_seeds: list[tuple[Node, float]] = []
+        running_tokens = 0
+        for node, score in seeds:
+            cost = node.token_estimate
+            if running_tokens + cost > seed_budget and trimmed_seeds:
+                break
+            trimmed_seeds.append((node, score))
+            running_tokens += cost
+        seeds = trimmed_seeds
+
         # Step 3: Build subgraph
         seed_nodes = [s[0] for s in seeds]
         seed_scores = {s[0].id: s[1] for s in seeds}
