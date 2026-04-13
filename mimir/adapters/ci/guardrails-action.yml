@@ -1,0 +1,37 @@
+name: Mimir Architecture Guardrails
+on: [pull_request]
+
+jobs:
+  guardrail-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Mimir
+        run: pip install mimir-context-server
+
+      - name: Build index (incremental)
+        run: mimir index
+
+      - name: Run guardrails
+        run: |
+          EXIT_CODE=0
+          git diff origin/${{ github.base_ref }}...${{ github.event.pull_request.head.sha }} | \
+            mimir guardrail check --diff - --rules mimir-rules.yaml \
+              --base origin/${{ github.base_ref }} \
+              --head ${{ github.event.pull_request.head.sha }} \
+              --output github-pr-comment \
+              --report-file guardrail-report.md \
+            || EXIT_CODE=$?
+          cat guardrail-report.md >> $GITHUB_STEP_SUMMARY
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "::error::Guardrail check failed (see PR comment for details)"
+            exit 1
+          fi

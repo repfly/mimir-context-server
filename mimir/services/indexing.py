@@ -6,12 +6,14 @@ It receives all infrastructure dependencies via constructor injection.
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from mimir.domain.config import MimirConfig
 from mimir.domain.errors import ParsingError
@@ -22,6 +24,14 @@ from mimir.ports.graph_store import GraphStore
 from mimir.domain.lang import detect_language
 from mimir.ports.parser import Parser, Symbol
 from mimir.ports.vector_store import VectorStore
+from mimir.services.graph_linker import (
+    detect_api_contracts,
+    detect_inheritance,
+    detect_shared_imports,
+    normalize_route,
+    resolve_cross_file_refs,
+)
+from mimir.services.summarizer import generate_heuristic_summaries, heuristic_summary
 
 logger = logging.getLogger(__name__)
 
@@ -64,22 +74,22 @@ class IndexingService:
             await self._index_repo(graph, repo_config)
 
         # Phase 2: Cross-file symbol resolution
-        self._resolve_cross_file_refs(graph)
+        resolve_cross_file_refs(graph, self._parser)
 
         # Phase 3: Cross-repo link detection
         if self._config.cross_repo.detect_api_contracts:
-            self._detect_api_contracts(graph)
+            detect_api_contracts(graph)
         if self._config.cross_repo.detect_shared_imports:
-            self._detect_shared_imports(graph)
+            detect_shared_imports(graph)
 
         logger.info("Graph built: %s", graph.stats())
 
         # Phase 4: Summarization
         if mode == "heuristic":
-            self._generate_heuristic_summaries(graph)
+            generate_heuristic_summaries(graph)
 
         # Phase 5: Embedding
-        await self._embed_graph(graph, mode)
+        await self._embed_and_upsert(graph, mode, show_progress=True)
 
         # Phase 6: Persist
         self._graph_store.save(graph)
@@ -272,74 +282,12 @@ class IndexingService:
 
                 # Add symbol nodes
                 for sym in symbols:
-                    base_id = f"{repo_name}:{rel_path}::{sym.name}"
-                    sym_id = base_id
-                    suffix = 2
-                    while graph.has_node(sym_id):
-                        sym_id = f"{base_id}_{suffix}"
-                        suffix += 1
-
-                    node_kind = self._map_symbol_kind(sym.kind)
-                    sym_node = Node(
-                        id=sym_id,
-                        repo=repo_name,
-                        kind=node_kind,
-                        name=sym.name,
-                        path=rel_path,
-                        start_line=sym.start_line,
-                        end_line=sym.end_line,
-                        raw_code=sym.code,
-                        signature=sym.signature,
-                        docstring=sym.docstring,
+                    node, edges = self._add_symbol_to_graph(
+                        graph, sym, repo_name, rel_path, file_id, repo_path,
                     )
-                    self._populate_git_metadata(sym_node, repo_path)
-                    graph.add_node(sym_node)
-                    all_new_nodes.append(sym_node)
+                    all_new_nodes.append(node)
+                    all_new_edges.extend(edges)
                     symbols_parsed += 1
-
-                    # CONTAINS edge
-                    edge = Edge(source=file_id, target=sym_id, kind=EdgeKind.CONTAINS)
-                    graph.add_edge(edge)
-                    all_new_edges.append(edge)
-
-                    # CALLS edges
-                    for callee_name in sym.calls:
-                        callee_id = self._resolve_symbol(callee_name, repo_name, rel_path, graph)
-                        if callee_id:
-                            call_edge = Edge(source=sym_id, target=callee_id, kind=EdgeKind.CALLS)
-                            graph.add_edge(call_edge)
-                            all_new_edges.append(call_edge)
-
-                    # IMPORTS edges
-                    for import_name in sym.imports:
-                        import_id = self._resolve_symbol(import_name, repo_name, rel_path, graph)
-                        if import_id:
-                            imp_edge = Edge(source=sym_id, target=import_id, kind=EdgeKind.IMPORTS)
-                            graph.add_edge(imp_edge)
-                            all_new_edges.append(imp_edge)
-
-                    # API endpoint detection
-                    for dec in sym.decorators:
-                        endpoint_info = self._parse_endpoint_decorator(dec)
-                        if endpoint_info:
-                            api_node = Node(
-                                id=sym_id,
-                                repo=repo_name,
-                                kind=NodeKind.API_ENDPOINT,
-                                name=sym.name,
-                                path=rel_path,
-                                start_line=sym.start_line,
-                                end_line=sym.end_line,
-                                raw_code=sym.code,
-                                signature=sym.signature,
-                                docstring=sym.docstring,
-                                last_modified=sym_node.last_modified,
-                                modification_count=sym_node.modification_count,
-                            )
-                            graph.add_node(api_node)
-                            # Replace in new_nodes list
-                            all_new_nodes = [n for n in all_new_nodes if n.id != sym_id]
-                            all_new_nodes.append(api_node)
 
             # Update commit state
             self._graph_store.save_repo_state(repo_name, current_commit)
@@ -370,22 +318,22 @@ class IndexingService:
                 pass
 
         # Phase 4: Re-resolve cross-file refs (on full graph)
-        self._resolve_cross_file_refs(graph)
+        resolve_cross_file_refs(graph, self._parser)
 
         # Phase 5: Re-detect cross-repo links (on full graph)
         if self._config.cross_repo.detect_api_contracts:
-            self._detect_api_contracts(graph)
+            detect_api_contracts(graph)
         if self._config.cross_repo.detect_shared_imports:
-            self._detect_shared_imports(graph)
+            detect_shared_imports(graph)
 
         # Phase 6: Summarisation for new/changed nodes only
         if mode == "heuristic":
             for node in all_new_nodes:
-                node.summary = self._heuristic_summary(node, graph)
+                node.summary = heuristic_summary(node, graph)
 
         # Phase 7: Embed new/changed nodes only
         if all_new_nodes:
-            await self._embed_nodes(all_new_nodes, mode, graph)
+            await self._embed_and_upsert(graph, mode, nodes_to_embed=all_new_nodes)
 
         # Phase 8: Persist delta
         if all_stale_ids:
@@ -408,7 +356,7 @@ class IndexingService:
                     if src and tgt and (src.repo == repo_config.name or tgt.repo == repo_config.name):
                         full_edges.append(e)
             if full_nodes:
-                await self._embed_nodes(full_nodes, mode, graph)
+                await self._embed_and_upsert(graph, mode, nodes_to_embed=full_nodes)
                 self._graph_store.save_partial(full_nodes, full_edges)
 
         total_removed = len(all_stale_ids)
@@ -536,83 +484,10 @@ class IndexingService:
 
                 # Add symbol nodes
                 for sym in symbols:
-                    base_id = f"{repo_name}:{rel_path}::{sym.name}"
-                    sym_id = base_id
-                    suffix = 2
-                    while graph.has_node(sym_id):
-                        sym_id = f"{base_id}_{suffix}"
-                        suffix += 1
-
-                    node_kind = self._map_symbol_kind(sym.kind)
-
-                    sym_node = Node(
-                        id=sym_id,
-                        repo=repo_name,
-                        kind=node_kind,
-                        name=sym.name,
-                        path=rel_path,
-                        start_line=sym.start_line,
-                        end_line=sym.end_line,
-                        raw_code=sym.code,
-                        signature=sym.signature,
-                        docstring=sym.docstring,
+                    self._add_symbol_to_graph(
+                        graph, sym, repo_name, rel_path, file_id, repo_path,
                     )
-
-                    # Git blame for temporal data
-                    self._populate_git_metadata(sym_node, repo_path)
-
-                    graph.add_node(sym_node)
                     symbols_indexed += 1
-
-                    # CONTAINS edge
-                    graph.add_edge(Edge(
-                        source=file_id,
-                        target=sym_id,
-                        kind=EdgeKind.CONTAINS,
-                    ))
-
-                    # CALLS edges from parsed call info
-                    for callee_name in sym.calls:
-                        callee_id = self._resolve_symbol(callee_name, repo_name, rel_path, graph)
-                        if callee_id:
-                            graph.add_edge(Edge(
-                                source=sym_id,
-                                target=callee_id,
-                                kind=EdgeKind.CALLS,
-                            ))
-
-                    # IMPORTS edges
-                    for import_name in sym.imports:
-                        import_id = self._resolve_symbol(import_name, repo_name, rel_path, graph)
-                        if import_id:
-                            graph.add_edge(Edge(
-                                source=sym_id,
-                                target=import_id,
-                                kind=EdgeKind.IMPORTS,
-                            ))
-
-                    # API endpoint detection
-                    for dec in sym.decorators:
-                        endpoint_info = self._parse_endpoint_decorator(dec)
-                        if endpoint_info:
-                            sym_node = graph.get_node(sym_id)
-                            if sym_node:
-                                # Re-tag as API_ENDPOINT
-                                api_node = Node(
-                                    id=sym_id,
-                                    repo=repo_name,
-                                    kind=NodeKind.API_ENDPOINT,
-                                    name=sym.name,
-                                    path=rel_path,
-                                    start_line=sym.start_line,
-                                    end_line=sym.end_line,
-                                    raw_code=sym.code,
-                                    signature=sym.signature,
-                                    docstring=sym.docstring,
-                                    last_modified=sym_node.last_modified,
-                                    modification_count=sym_node.modification_count,
-                                )
-                                graph.add_node(api_node)  # overwrite
 
         logger.info(
             "Repo %s: %d files, %d symbols",
@@ -690,36 +565,14 @@ class IndexingService:
                 graph.add_edge(edge)
                 new_edges.append(edge)
 
-            # Add symbol nodes
+            # Add symbol nodes (lightweight — no CALLS/IMPORTS/API resolution)
             for sym in symbols:
-                base_id = f"{repo_name}:{rel_path}::{sym.name}"
-                sym_id = base_id
-                suffix = 2
-                while graph.has_node(sym_id):
-                    sym_id = f"{base_id}_{suffix}"
-                    suffix += 1
-
-                node_kind = self._map_symbol_kind(sym.kind)
-                sym_node = Node(
-                    id=sym_id,
-                    repo=repo_name,
-                    kind=node_kind,
-                    name=sym.name,
-                    path=rel_path,
-                    start_line=sym.start_line,
-                    end_line=sym.end_line,
-                    raw_code=sym.code,
-                    signature=sym.signature,
-                    docstring=sym.docstring,
+                node, edges = self._add_symbol_to_graph(
+                    graph, sym, repo_name, rel_path, file_id, repo_path,
+                    resolve_edges=False,
                 )
-                self._populate_git_metadata(sym_node, repo_path)
-                graph.add_node(sym_node)
-                new_nodes.append(sym_node)
-
-                # CONTAINS edge
-                edge = Edge(source=file_id, target=sym_id, kind=EdgeKind.CONTAINS)
-                graph.add_edge(edge)
-                new_edges.append(edge)
+                new_nodes.append(node)
+                new_edges.extend(edges)
 
         # 3. Affected-set cross-file resolution (only for new symbols)
         new_symbol_nodes = [n for n in new_nodes if n.is_symbol]
@@ -729,11 +582,11 @@ class IndexingService:
 
         # 4. Heuristic summaries (never LLM)
         for node in new_nodes:
-            node.summary = self._heuristic_summary(node, graph)
+            node.summary = heuristic_summary(node, graph)
 
         # 5. Embed new nodes
         if new_nodes:
-            await self._embed_nodes(new_nodes, "heuristic", graph)
+            await self._embed_and_upsert(graph, "heuristic", nodes_to_embed=new_nodes)
 
         logger.info(
             "index_files: -%d removed, +%d nodes, +%d edges",
@@ -801,7 +654,7 @@ class IndexingService:
             identifiers = self._parser.extract_identifiers(
                 node.raw_code, language=lang, file_path=node.path,
             )
-            inherits_names = self._detect_inheritance(node)
+            inherits_names = detect_inheritance(node)
 
             for ident in identifiers:
                 if ident == node.name or ident in ambiguous_names:
@@ -827,7 +680,7 @@ class IndexingService:
             identifiers = self._parser.extract_identifiers(
                 node.raw_code, language=lang, file_path=node.path,
             )
-            inherits_names = self._detect_inheritance(node)
+            inherits_names = detect_inheritance(node)
 
             for ident in identifiers:
                 if ident not in new_symbol_names or ident in ambiguous_names:
@@ -860,6 +713,97 @@ class IndexingService:
             "constant": NodeKind.CONSTANT,
         }
         return mapping.get(kind_str, NodeKind.FUNCTION)
+
+    def _add_symbol_to_graph(
+        self,
+        graph: CodeGraph,
+        sym: "Symbol",
+        repo_name: str,
+        rel_path: str,
+        file_id: str,
+        repo_path: Path,
+        *,
+        resolve_edges: bool = True,
+    ) -> tuple[Node, list[Edge]]:
+        """Create a symbol node, add it to *graph*, and return ``(node, edges)``.
+
+        Handles ID deduplication, git metadata, CONTAINS edge, and optionally
+        CALLS/IMPORTS/API-endpoint detection.  Set *resolve_edges* to ``False``
+        for lightweight paths (file watcher) that skip cross-symbol linking.
+        """
+        base_id = f"{repo_name}:{rel_path}::{sym.name}"
+        sym_id = base_id
+        suffix = 2
+        while graph.has_node(sym_id):
+            sym_id = f"{base_id}_{suffix}"
+            suffix += 1
+
+        node_kind = self._map_symbol_kind(sym.kind)
+        sym_node = Node(
+            id=sym_id,
+            repo=repo_name,
+            kind=node_kind,
+            name=sym.name,
+            path=rel_path,
+            start_line=sym.start_line,
+            end_line=sym.end_line,
+            raw_code=sym.code,
+            signature=sym.signature,
+            docstring=sym.docstring,
+        )
+        self._populate_git_metadata(sym_node, repo_path)
+        graph.add_node(sym_node)
+
+        edges: list[Edge] = []
+
+        # CONTAINS edge
+        contains = Edge(source=file_id, target=sym_id, kind=EdgeKind.CONTAINS)
+        graph.add_edge(contains)
+        edges.append(contains)
+
+        if resolve_edges:
+            # CALLS edges
+            for callee_name in sym.calls:
+                callee_id = self._resolve_symbol(callee_name, repo_name, rel_path, graph)
+                if callee_id:
+                    e = Edge(source=sym_id, target=callee_id, kind=EdgeKind.CALLS)
+                    graph.add_edge(e)
+                    edges.append(e)
+
+            # IMPORTS edges
+            for import_name in sym.imports:
+                import_id = self._resolve_symbol(import_name, repo_name, rel_path, graph)
+                if import_id:
+                    e = Edge(source=sym_id, target=import_id, kind=EdgeKind.IMPORTS)
+                    graph.add_edge(e)
+                    edges.append(e)
+
+            # API endpoint detection
+            for dec in sym.decorators:
+                endpoint_info = self._parse_endpoint_decorator(dec)
+                if endpoint_info:
+                    current = graph.get_node(sym_id)
+                    if current:
+                        api_node = Node(
+                            id=sym_id,
+                            repo=repo_name,
+                            kind=NodeKind.API_ENDPOINT,
+                            name=sym.name,
+                            path=rel_path,
+                            start_line=sym.start_line,
+                            end_line=sym.end_line,
+                            raw_code=sym.code,
+                            signature=sym.signature,
+                            docstring=sym.docstring,
+                            last_modified=current.last_modified,
+                            modification_count=current.modification_count,
+                            http_method=endpoint_info["method"],
+                            route_path=endpoint_info["endpoint"],
+                        )
+                        graph.add_node(api_node)  # overwrite
+                        sym_node = api_node
+
+        return sym_node, edges
 
     @staticmethod
     def _resolve_symbol(
@@ -911,7 +855,6 @@ class IndexingService:
     @staticmethod
     def _parse_endpoint_decorator(decorator: str) -> Optional[dict]:
         """Parse a decorator to detect API endpoint info."""
-        import re
         patterns = [
             r'@\w+\.(get|post|put|delete|patch)\s*\(\s*["\']([^"\']+)',
             r'@app\.route\s*\(\s*["\']([^"\']+)',
@@ -924,266 +867,6 @@ class IndexingService:
                     return {"method": groups[0].upper(), "endpoint": groups[1]}
                 return {"method": "GET", "endpoint": groups[0]}
         return None
-
-    def _detect_api_contracts(self, graph: CodeGraph) -> None:
-        """Detect cross-repo API call relationships."""
-        import re
-
-        # Collect all API endpoints
-        endpoints: dict[str, str] = {}  # url → node_id
-        for node in graph.all_nodes():
-            if node.kind == NodeKind.API_ENDPOINT and node.raw_code:
-                for dec in (node.docstring or "").split("\n"):
-                    pass  # future: parse route from docstring
-                # Try to extract from decorators in code
-                for match in re.finditer(
-                    r'@\w+\.(get|post|put|delete|patch)\s*\(\s*["\']([^"\']+)',
-                    node.raw_code, re.IGNORECASE,
-                ):
-                    url = match.group(2)
-                    endpoints[url] = node.id
-
-        # Find HTTP client calls matching endpoints
-        url_call_patterns = [
-            r'(?:requests|httpx|aiohttp)\.(get|post|put|delete|patch)\s*\([^)]*["\']([^"\']*)',
-            r'fetch\s*\(\s*[`"\']([^`"\']+)',
-        ]
-        for node in graph.symbol_nodes():
-            if not node.raw_code:
-                continue
-            for pattern in url_call_patterns:
-                for match in re.finditer(pattern, node.raw_code, re.IGNORECASE):
-                    url = match.group(2) if match.lastindex and match.lastindex >= 2 else match.group(1)
-                    # Try to match against known endpoints
-                    for ep_url, ep_id in endpoints.items():
-                        if ep_url in url and graph.get_node(ep_id) is not None:
-                            ep_node = graph.get_node(ep_id)
-                            if ep_node and ep_node.repo != node.repo:
-                                graph.add_edge(Edge(
-                                    source=node.id,
-                                    target=ep_id,
-                                    kind=EdgeKind.API_CALLS,
-                                    metadata={"url": url},
-                                ))
-                                logger.info(
-                                    "Cross-repo API call: %s → %s (%s)",
-                                    node.id, ep_id, url,
-                                )
-
-    def _detect_shared_imports(self, graph: CodeGraph) -> None:
-        """Detect shared library usage across repos."""
-        # Build import index: symbol_name → list of (repo, node_id) that define it
-        definitions: dict[str, list[tuple[str, str]]] = {}
-        for node in graph.symbol_nodes():
-            definitions.setdefault(node.name, []).append((node.repo, node.id))
-
-        # Find imports that cross repo boundaries
-        for edge in list(graph.all_edges()):
-            if edge.kind == EdgeKind.IMPORTS:
-                src = graph.get_node(edge.source)
-                tgt = graph.get_node(edge.target)
-                if src and tgt and src.repo != tgt.repo:
-                    graph.add_edge(Edge(
-                        source=edge.source,
-                        target=edge.target,
-                        kind=EdgeKind.SHARED_LIB,
-                    ))
-
-    # ------------------------------------------------------------------
-    # Cross-file symbol resolution
-    # ------------------------------------------------------------------
-
-    def _resolve_cross_file_refs(self, graph: CodeGraph) -> int:
-        """Scan every symbol's code for references to other known symbols.
-
-        Creates CALLS, USES_TYPE, and INHERITS edges across files.
-        Language-agnostic: uses tree-sitter identifier extraction
-        (with regex fallback) and matches against the symbol name index.
-
-        Returns the number of new edges created.
-        """
-        from mimir.domain.lang import detect_language
-
-        # Guard: if the parser doesn't support identifier extraction, use regex fallback
-        if not hasattr(self._parser, 'extract_identifiers'):
-            logger.warning("Parser does not support extract_identifiers — skipping cross-file resolution")
-            return 0
-
-        # 1. Build name → [node] index (only symbols, not containers)
-        name_index: dict[str, list[Node]] = {}
-        for node in graph.all_nodes():
-            if node.is_symbol:
-                name_index.setdefault(node.name, []).append(node)
-
-        # Skip very common names that would cause excessive false positives.
-        # A name that appears in >20 nodes is likely too generic (e.g. "init").
-        ambiguous_names = {
-            name for name, nodes in name_index.items()
-            if len(nodes) > 20
-        }
-
-        # 2. For each symbol, extract identifiers from raw_code and resolve
-        edges_created = 0
-        seen_edges: set[tuple[str, str, str]] = set()  # (source, target, kind)
-
-        # Collect all existing non-CONTAINS edges to avoid duplicates
-        for edge in graph.all_edges():
-            if edge.kind != EdgeKind.CONTAINS:
-                seen_edges.add((edge.source, edge.target, edge.kind.value))
-
-        for node in graph.all_nodes():
-            if not node.is_symbol or not node.raw_code:
-                continue
-
-            # Extract identifiers from code
-            lang = detect_language(node.path) if node.path else None
-            identifiers = self._parser.extract_identifiers(
-                node.raw_code, language=lang, file_path=node.path,
-            )
-
-            # Also check for inheritance in the signature line
-            inherits_names = self._detect_inheritance(node)
-
-            for ident in identifiers:
-                if ident == node.name:
-                    continue  # skip self-reference
-                if ident in ambiguous_names:
-                    continue
-
-                targets = name_index.get(ident)
-                if not targets:
-                    continue
-
-                for target in targets:
-                    # Skip self-references
-                    if target.id == node.id:
-                        continue
-
-                    # Determine edge kind
-                    if ident in inherits_names:
-                        edge_kind = EdgeKind.INHERITS
-                    elif target.kind in (NodeKind.CLASS, NodeKind.TYPE):
-                        edge_kind = EdgeKind.USES_TYPE
-                    else:
-                        edge_kind = EdgeKind.CALLS
-
-                    edge_key = (node.id, target.id, edge_kind.value)
-                    if edge_key in seen_edges:
-                        continue
-                    seen_edges.add(edge_key)
-
-                    graph.add_edge(Edge(
-                        source=node.id,
-                        target=target.id,
-                        kind=edge_kind,
-                    ))
-                    edges_created += 1
-
-        logger.info("Cross-file resolution: %d new edges created", edges_created)
-        return edges_created
-
-    @staticmethod
-    def _detect_inheritance(node: Node) -> set[str]:
-        """Extract type names from a class/struct/enum signature that
-        indicate inheritance, conformance, or implementation.
-
-        Language-agnostic: looks for common patterns in the first line:
-          class Foo(Bar, Baz)         — Python
-          class Foo : Bar, Baz        — Swift, Kotlin, C#
-          class Foo extends Bar       — Java, JS/TS
-          class Foo implements Bar    — Java
-          struct Foo : Protocol       — Swift
-          type Foo struct { embedded } — Go (handled separately)
-        """
-        import re
-
-        if node.kind not in (NodeKind.CLASS, NodeKind.TYPE):
-            return set()
-
-        sig = node.signature or ""
-        if not sig:
-            # Use the first line of raw_code
-            if node.raw_code:
-                sig = node.raw_code.split("\n", 1)[0]
-            else:
-                return set()
-
-        names: set[str] = set()
-
-        # Pattern 1: parenthesised bases — class Foo(Bar, Baz):
-        m = re.search(r'\(\s*([^)]+)\)', sig)
-        if m:
-            for part in m.group(1).split(","):
-                # Strip generics, default args, etc.
-                base = re.split(r'[<\[\(=]', part.strip())[0].strip()
-                if base and re.match(r'^[A-Z]\w*$', base):
-                    names.add(base)
-
-        # Pattern 2: colon-separated — class Foo : Bar, Baz
-        m = re.search(r'(?:class|struct|enum|protocol|interface)\s+\w+\s*:\s*(.+?)(?:\{|where|$)', sig)
-        if m:
-            for part in m.group(1).split(","):
-                base = re.split(r'[<\[\(]', part.strip())[0].strip()
-                if base and re.match(r'^[A-Z]\w*$', base):
-                    names.add(base)
-
-        # Pattern 3: extends / implements keywords
-        for kw in ("extends", "implements"):
-            m = re.search(rf'{kw}\s+([\w,\s<>]+?)(?:\{{|implements|$)', sig)
-            if m:
-                for part in m.group(1).split(","):
-                    base = re.split(r'[<\[\(]', part.strip())[0].strip()
-                    if base and re.match(r'^[A-Z]\w*$', base):
-                        names.add(base)
-
-        return names
-
-    # ------------------------------------------------------------------
-    # Summarisation
-    # ------------------------------------------------------------------
-
-    def _generate_heuristic_summaries(self, graph: CodeGraph) -> None:
-        """Generate summaries from signatures + docstrings + callee names."""
-        for node in graph.all_nodes():
-            node.summary = self._heuristic_summary(node, graph)
-
-    @staticmethod
-    def _heuristic_summary(node: Node, graph: CodeGraph) -> str:
-        """Build a structured summary without LLM."""
-        parts: list[str] = []
-
-        if node.kind in (NodeKind.FUNCTION, NodeKind.METHOD):
-            if node.signature:
-                parts.append(node.signature)
-            if node.docstring:
-                parts.append(node.docstring[:200])
-            callees = graph.get_callees(node.id)
-            if callees:
-                parts.append(f"Calls: {', '.join(c.name for c in callees[:10])}")
-            callers = graph.get_callers(node.id)
-            if callers:
-                parts.append(f"Called by: {', '.join(c.name for c in callers[:10])}")
-        elif node.kind == NodeKind.FILE:
-            children = graph.get_children(node.id)
-            parts.append(f"File: {node.path}")
-            for child in children[:20]:
-                sig = child.signature or child.name
-                doc = f" — {child.docstring[:80]}" if child.docstring else ""
-                parts.append(f"  {sig}{doc}")
-        elif node.kind == NodeKind.MODULE:
-            children = graph.get_children(node.id)
-            parts.append(f"Module: {node.name}")
-            for child in children:
-                symbol_count = len(graph.get_children(child.id))
-                parts.append(f"  {child.name} ({symbol_count} symbols)")
-        elif node.kind == NodeKind.REPOSITORY:
-            modules = graph.get_children(node.id)
-            parts.append(f"Repository: {node.name}")
-            for mod in modules:
-                file_count = len(graph.get_children(mod.id))
-                parts.append(f"  {mod.name}/ ({file_count} files)")
-
-        return "\n".join(parts) if parts else node.name
 
     # ------------------------------------------------------------------
     # Embedding
@@ -1204,6 +887,8 @@ class IndexingService:
             context_parts: list[str] = []
             if node.path:
                 context_parts.append(f"File: {node.path}")
+            if node.http_method and node.route_path:
+                context_parts.append(f"Route: {node.http_method} {node.route_path}")
             if node.docstring:
                 context_parts.append(f"Doc: {node.docstring[:200]}")
 
@@ -1254,49 +939,96 @@ class IndexingService:
 
         return "\n".join(parts) if parts else node.name
 
-    async def _embed_graph(self, graph: CodeGraph, mode: str) -> None:
-        """Embed all nodes and upsert into vector store."""
-        from mimir.domain.models import SYMBOL_KINDS
-        from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+    async def _embed_texts_batched(
+        self,
+        texts: list[str],
+        on_batch_done: Optional[Callable[[], None]] = None,
+    ) -> list[list[float]]:
+        """Embed ``texts`` in batches with bounded concurrency.
+
+        Batches are dispatched via ``asyncio.gather`` and capped by a
+        semaphore of size ``embeddings.max_concurrent_batches``.  Input order
+        is preserved in the returned list (``gather`` returns results in
+        submission order).
+
+        ``on_batch_done`` is called once per completed batch and can be used
+        by callers (e.g. ``_embed_and_upsert``) to drive a progress bar.
+        """
+        batch_size = self._config.embeddings.batch_size
+        max_concurrent = max(1, self._config.embeddings.max_concurrent_batches)
+        sem = asyncio.Semaphore(max_concurrent)
+
+        async def run_batch(chunk: list[str]) -> list[list[float]]:
+            async with sem:
+                result = await self._embedder.embed_batch(chunk)
+            if on_batch_done is not None:
+                on_batch_done()
+            return result
+
+        chunks = [texts[i : i + batch_size] for i in range(0, len(texts), batch_size)]
+        results = await asyncio.gather(*(run_batch(chunk) for chunk in chunks))
+
+        flat: list[list[float]] = []
+        for r in results:
+            flat.extend(r)
+        return flat
+
+    async def _embed_and_upsert(
+        self,
+        graph: CodeGraph,
+        mode: str,
+        *,
+        nodes_to_embed: Optional[list[Node]] = None,
+        show_progress: bool = False,
+    ) -> None:
+        """Embed nodes and upsert into the vector store.
+
+        When *nodes_to_embed* is ``None`` (full-graph mode) every node in
+        *graph* is processed.  Otherwise only the given list is embedded.
+        *show_progress* enables a Rich progress bar (used by the full-index
+        path).
+        """
+        source = nodes_to_embed if nodes_to_embed is not None else list(graph.all_nodes())
 
         texts: list[str] = []
         nodes: list[Node] = []
 
-        for node in graph.all_nodes():
+        for node in source:
             if mode == "none" and not node.is_symbol:
-                continue  # none mode: only embed leaf symbols
-
-            text = self._embedding_text(node, graph)
+                continue
+            text = self._embedding_text(node, graph) if graph else (node.raw_code or node.summary or node.name)
             if text:
-                texts.append(text[:4000])  # cap text length
+                texts.append(text[:4000])
                 nodes.append(node)
 
         if not texts:
-            logger.warning("No texts to embed")
+            if nodes_to_embed is None:
+                logger.warning("No texts to embed")
             return
 
         logger.info("Embedding %d nodes...", len(texts))
 
-        # Batch embed
-        batch_size = self._config.embeddings.batch_size
-        all_embeddings: list[list[float]] = []
-        total_batches = (len(texts) + batch_size - 1) // batch_size
+        if show_progress:
+            from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            TextColumn("{task.completed}/{task.total} batches"),
-            transient=True,
-        ) as progress:
-            task_id = progress.add_task("[green]Embedding nodes...", total=total_batches)
-            
-            for i in range(0, len(texts), batch_size):
-                batch = texts[i : i + batch_size]
-                embeddings = await self._embedder.embed_batch(batch)
-                all_embeddings.extend(embeddings)
-                progress.update(task_id, advance=1)
+            batch_size = self._config.embeddings.batch_size
+            total_batches = (len(texts) + batch_size - 1) // batch_size
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                TextColumn("{task.completed}/{task.total} batches"),
+                transient=True,
+            ) as progress:
+                task_id = progress.add_task("[green]Embedding nodes...", total=total_batches)
+                all_embeddings = await self._embed_texts_batched(
+                    texts,
+                    on_batch_done=lambda: progress.update(task_id, advance=1),
+                )
+        else:
+            all_embeddings = await self._embed_texts_batched(texts)
 
         # Assign to nodes and upsert to vector store
         ids: list[str] = []
@@ -1319,54 +1051,4 @@ class IndexingService:
         )
 
         logger.info("Embedded and stored %d vectors", len(ids))
-
-    async def _embed_nodes(self, nodes_to_embed: list[Node], mode: str, graph: Optional[CodeGraph] = None) -> None:
-        """Embed a specific list of nodes and upsert into vector store.
-
-        Unlike ``_embed_graph`` which iterates the entire graph, this only
-        processes the provided nodes — used by incremental indexing.
-        """
-        texts: list[str] = []
-        nodes: list[Node] = []
-
-        for node in nodes_to_embed:
-            if mode == "none" and not node.is_symbol:
-                continue
-            text = self._embedding_text(node, graph) if graph else (node.raw_code or node.summary or node.name)
-            if text:
-                texts.append(text[:4000])
-                nodes.append(node)
-
-        if not texts:
-            return
-
-        logger.info("Embedding %d changed nodes...", len(texts))
-
-        batch_size = self._config.embeddings.batch_size
-        all_embeddings: list[list[float]] = []
-
-        for i in range(0, len(texts), batch_size):
-            batch_texts = texts[i : i + batch_size]
-            embeddings = await self._embedder.embed_batch(batch_texts)
-            all_embeddings.extend(embeddings)
-
-        ids: list[str] = []
-        metadatas: list[dict] = []
-        for node, embedding in zip(nodes, all_embeddings):
-            node.embedding = embedding
-            ids.append(node.id)
-            metadatas.append({
-                "repo": node.repo,
-                "kind": node.kind.value,
-                "path": node.path or "",
-                "last_modified": node.last_modified or "",
-            })
-
-        self._vector_store.upsert(
-            ids=ids,
-            embeddings=all_embeddings,
-            metadatas=metadatas,
-            documents=texts,
-        )
-        logger.info("Embedded and stored %d changed vectors", len(ids))
 

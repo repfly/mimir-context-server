@@ -8,15 +8,15 @@ as the appropriate Mimir error with context.  The application layer never sees
 from __future__ import annotations
 
 
-class TreeDexError(Exception):
+class MimirError(Exception):
     """Base exception for all Mimir errors."""
 
 
-class ConfigError(TreeDexError):
+class ConfigError(MimirError):
     """Invalid configuration: missing keys, bad values, unreachable paths."""
 
 
-class IndexingError(TreeDexError):
+class IndexingError(MimirError):
     """Failure during the indexing pipeline."""
 
 
@@ -32,13 +32,21 @@ class EmbeddingError(IndexingError):
     """Embedding API call failed or returned unexpected results."""
 
 
-class StorageError(TreeDexError):
+class StorageError(MimirError):
     """Database read/write failure (SQLite, ChromaDB, etc.)."""
 
 
-class RetrievalError(TreeDexError):
+class RetrievalError(MimirError):
     """Failure during context assembly / search."""
 
 
-class SessionError(TreeDexError):
+class SessionError(MimirError):
     """Failure in session management."""
+
+
+class GuardrailError(MimirError):
+    """Failure during guardrail evaluation."""
+
+
+class RuleConfigError(GuardrailError):
+    """Invalid or missing guardrail rule configuration."""

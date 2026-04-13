@@ -45,6 +45,10 @@ class GraphStore(Protocol):
         """Return ``{repo_name: commit_hash}`` for every tracked repo."""
         ...
 
+    def update_retrieval_metadata(self, nodes: list) -> None:
+        """Persist retrieval counters and timestamps for the given nodes."""
+        ...
+
     def vacuum(self) -> None:
         """Compact and optimize the storage backend."""
         ...

@@ -133,6 +133,9 @@ class NumpyVectorStore:
         # Rebuild index
         self._id_to_idx = {vid: i for i, vid in enumerate(self._ids)}
 
+    def get_existing_ids(self, ids: list[str]) -> set[str]:
+        return {i for i in ids if i in self._id_to_idx}
+
     def count(self) -> int:
         return len(self._ids)
 

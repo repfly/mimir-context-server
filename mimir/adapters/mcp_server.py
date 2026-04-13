@@ -258,6 +258,52 @@ def run_mcp_server(config: MimirConfig, workspace_name: str | None = None) -> No
                                 "required": ["repo", "declared_dependencies"],
                             },
                         },
+                        {
+                            "name": "validate_change",
+                            "description": (
+                                "Validate a code change against architectural rules before committing. "
+                                "Pass a unified diff (from `git diff`) and receive a list of violations "
+                                "if any architectural rules are broken. Use this BEFORE committing changes "
+                                "to catch layer violations, circular dependencies, coupling threshold "
+                                "breaches, and high-impact API changes."
+                            ),
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "diff": {
+                                        "type": "string",
+                                        "description": "Unified diff text (output of `git diff` or `git diff --cached`)",
+                                    },
+                                    "rules_path": {
+                                        "type": "string",
+                                        "description": "Path to mimir-rules.yaml. Default: ./mimir-rules.yaml",
+                                    },
+                                },
+                                "required": ["diff"],
+                            },
+                        },
+                        {
+                            "name": "can_i_modify",
+                            "description": (
+                                "Check if you are allowed to modify a file per the agent policy. "
+                                "Returns whether the file is within the agent's allowed scope "
+                                "and whether human review would be required."
+                            ),
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {
+                                    "file_path": {
+                                        "type": "string",
+                                        "description": "Path to the file you want to modify.",
+                                    },
+                                    "policy_path": {
+                                        "type": "string",
+                                        "description": "Path to mimir-agent-policy.yaml. Default: ./mimir-agent-policy.yaml",
+                                    },
+                                },
+                                "required": ["file_path"],
+                            },
+                        },
                     ],
                 })
 
@@ -281,6 +327,10 @@ def run_mcp_server(config: MimirConfig, workspace_name: str | None = None) -> No
                         container.session.session_dedup(
                             sg, session, query_embedding=bundle.query_embedding,
                         )
+
+                        # Re-fit to budget after dedup may have changed node set
+                        effective_budget = tool_args.get("budget") or container.retrieval._config.retrieval.default_token_budget
+                        container.retrieval._fit_to_budget(sg, effective_budget, seed_ids=set())
 
                         # Apply deduplication back to the bundle
                         bundle.nodes = list(sg.nodes.values())
@@ -394,6 +444,52 @@ def run_mcp_server(config: MimirConfig, workspace_name: str | None = None) -> No
                         "content": [{
                             "type": "text",
                             "text": report.format_for_llm(),
+                        }],
+                    })
+
+                elif tool_name == "validate_change":
+                    from pathlib import Path
+                    from mimir.domain.guardrails_config import load_rules
+
+                    rules_path = Path(tool_args.get("rules_path", "mimir-rules.yaml"))
+                    rules = load_rules(rules_path)
+                    result = await container.guardrail.evaluate(
+                        graph, tool_args["diff"], rules,
+                    )
+                    return _response(request_id, {
+                        "content": [{
+                            "type": "text",
+                            "text": result.format_for_llm(),
+                        }],
+                    })
+
+                elif tool_name == "can_i_modify":
+                    from pathlib import Path
+                    from mimir.domain.guardrails_config import load_agent_policy
+                    from mimir.services.agent_policy import AgentPolicy
+
+                    policy_path = Path(tool_args.get("policy_path", "mimir-agent-policy.yaml"))
+                    try:
+                        raw_policies = load_agent_policy(policy_path)
+                        policy = AgentPolicy.from_dict(raw_policies[0]) if raw_policies else None
+                    except Exception:
+                        policy = None
+
+                    file_path = tool_args["file_path"]
+                    if policy:
+                        allowed = container.agent_policy.check_file_access(policy, file_path)
+                        text = (
+                            f"File: {file_path}\n"
+                            f"Policy: {policy.name}\n"
+                            f"Allowed: {'yes' if allowed else 'NO — outside agent scope'}"
+                        )
+                    else:
+                        text = f"File: {file_path}\nNo agent policy found — allowed by default."
+
+                    return _response(request_id, {
+                        "content": [{
+                            "type": "text",
+                            "text": text,
                         }],
                     })
 

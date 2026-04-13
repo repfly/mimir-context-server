@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main, develop]
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run tests
+        run: pytest --tb=short -q
+
+  guardrails:
+    name: Architectural Guardrails
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Mimir
+        run: pip install -e .
+
+      - name: Build code graph
+        run: mimir index
+
+      - name: Run guardrail check
+        id: guardrails
+        run: |
+          EXIT_CODE=0
+          git diff origin/${{ github.base_ref }}...${{ github.event.pull_request.head.sha }} | \
+            mimir guardrail check --diff - \
+              --rules mimir-rules.yaml \
+              --base origin/${{ github.base_ref }} \
+              --head ${{ github.event.pull_request.head.sha }} \
+              --output github-pr-comment \
+              --report-file guardrail-report.md \
+            || EXIT_CODE=$?
+          echo "exit_code=$EXIT_CODE" >> $GITHUB_ENV
+          cat guardrail-report.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Comment on PR
+        if: always() && hashFiles('guardrail-report.md') != ''
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: mimir-guardrails
+          path: guardrail-report.md
+
+      - name: Fail if violations
+        if: env.exit_code != '0'
+        run: exit 1

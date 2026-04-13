@@ -6,12 +6,12 @@ import asyncio
 import logging
 from typing import Optional
 
-from mimir.domain.errors import TreeDexError
+from mimir.domain.errors import MimirError
 
 logger = logging.getLogger(__name__)
 
 
-class LlmError(TreeDexError):
+class LlmError(MimirError):
     """LLM API call failed."""
 
 

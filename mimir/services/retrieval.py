@@ -21,10 +21,11 @@ from mimir.ports.embedder import Embedder
 from mimir.ports.vector_store import VectorStore
 from mimir.services.intent import classify_intent, INTENT_PROFILES
 
+from mimir.ports.graph_store import GraphStore
+
 if TYPE_CHECKING:
     from mimir.services.quality import QualityService
     from mimir.services.temporal import TemporalService
-    from mimir.infra.stores.sqlite_graph import SqliteGraphStore
 
 logger = logging.getLogger(__name__)
 
@@ -37,24 +38,15 @@ class RetrievalService:
         config: MimirConfig,
         embedder: Embedder,
         vector_store: VectorStore,
+        quality_service: Optional[QualityService] = None,
+        temporal_service: Optional[TemporalService] = None,
+        graph_store: Optional[GraphStore] = None,
     ) -> None:
         self._config = config
         self._embedder = embedder
         self._vector_store = vector_store
-        self._quality_service: Optional[QualityService] = None
-        self._temporal_service: Optional[TemporalService] = None
-        self._graph_store: Optional[SqliteGraphStore] = None
-
-    def set_quality_service(self, quality_service: QualityService) -> None:
-        """Inject the quality service for connectivity-aware scoring."""
         self._quality_service = quality_service
-
-    def set_temporal_service(self, temporal_service: TemporalService) -> None:
-        """Inject the temporal service for co-retrieval tracking."""
         self._temporal_service = temporal_service
-
-    def set_graph_store(self, graph_store: SqliteGraphStore) -> None:
-        """Inject the graph store for persisting retrieval metadata."""
         self._graph_store = graph_store
 
     async def search(
@@ -151,6 +143,37 @@ class RetrievalService:
                     seed_ids_so_far.add(node.id)
             # Re-sort by score
             seeds.sort(key=lambda x: x[1], reverse=True)
+
+        # Step 2d: Route-based matching for API endpoints
+        route_matches = self._route_match_seeds(query, graph, repos)
+        if route_matches:
+            seed_ids_so_far = {s[0].id for s in seeds}
+            for node, score in route_matches:
+                if node.id in seed_ids_so_far:
+                    # Boost: route match is high-confidence
+                    seeds = [
+                        (n, max(s, score)) if n.id == node.id else (n, s)
+                        for n, s in seeds
+                    ]
+                else:
+                    seeds.append((node, score))
+                    seed_ids_so_far.add(node.id)
+            seeds.sort(key=lambda x: x[1], reverse=True)
+
+        # Step 2e: Trim seeds to fit within token budget
+        # Seeds are sorted by score (descending). Keep only the top seeds
+        # whose cumulative token cost stays under the budget, reserving
+        # room for expansion context.
+        seed_budget = int(budget * 0.75)  # reserve 25% for expanded neighbours
+        trimmed_seeds: list[tuple[Node, float]] = []
+        running_tokens = 0
+        for node, score in seeds:
+            cost = node.token_estimate
+            if running_tokens + cost > seed_budget and trimmed_seeds:
+                break
+            trimmed_seeds.append((node, score))
+            running_tokens += cost
+        seeds = trimmed_seeds
 
         # Step 3: Build subgraph
         seed_nodes = [s[0] for s in seeds]
@@ -412,6 +435,75 @@ class RetrievalService:
         # Sort by score desc, cap results
         matches.sort(key=lambda x: x[1], reverse=True)
         return matches[:30]
+
+    # ------------------------------------------------------------------
+    # Route matching
+    # ------------------------------------------------------------------
+
+    _HTTP_METHODS = frozenset({"get", "post", "put", "delete", "patch", "head", "options"})
+
+    _ROUTE_PATTERN = re.compile(
+        r"""
+        (?:(?P<method>GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+)?  # optional HTTP method
+        (?P<path>/[^\s]*)                                           # path starting with /
+        """,
+        re.VERBOSE | re.IGNORECASE,
+    )
+
+    def _route_match_seeds(
+        self,
+        query: str,
+        graph: CodeGraph,
+        repos: Optional[list[str]] = None,
+    ) -> list[tuple[Node, float]]:
+        """Find API_ENDPOINT nodes whose route matches a path in the query.
+
+        Detects route-shaped patterns like ``/orders``, ``POST /users/{id}``,
+        or ``GET /api/health`` in the query text and matches them against
+        stored ``route_path`` / ``http_method`` on API_ENDPOINT nodes.
+        """
+        match = self._ROUTE_PATTERN.search(query)
+        if not match:
+            return []
+
+        query_method = (match.group("method") or "").upper()
+        query_path = match.group("path").rstrip("/").lower() or "/"
+
+        matches: list[tuple[Node, float]] = []
+        for node in graph.all_nodes():
+            if node.kind != NodeKind.API_ENDPOINT or not node.route_path:
+                continue
+            if repos and node.repo not in repos:
+                continue
+
+            node_path = node.route_path.rstrip("/").lower() or "/"
+            # Strip path params for comparison: /orders/{id} → /orders/
+            node_path_collapsed = re.sub(r'\{[^}]+\}', '{_}', node_path)
+            query_path_collapsed = re.sub(r'\{[^}]+\}', '{_}', query_path)
+
+            if node_path_collapsed != query_path_collapsed:
+                # Also try suffix match: query /orders matches node /api/v1/orders
+                if not (
+                    node_path_collapsed.endswith(query_path_collapsed)
+                    and (
+                        len(node_path_collapsed) == len(query_path_collapsed)
+                        or node_path_collapsed[-len(query_path_collapsed) - 1] == "/"
+                    )
+                ):
+                    continue
+
+            # Path matches — compute score
+            score = 1.0  # high base score for exact route match
+            if query_method and node.http_method:
+                if query_method == node.http_method.upper():
+                    score = 1.2  # method + path match → highest priority
+                else:
+                    score = 0.6  # path matches but wrong method → still relevant
+
+            matches.append((node, score))
+
+        matches.sort(key=lambda x: x[1], reverse=True)
+        return matches
 
     # ------------------------------------------------------------------
     # Subgraph expansion

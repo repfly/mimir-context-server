@@ -40,6 +40,7 @@ SYMBOL_KINDS: frozenset[NodeKind] = frozenset({
     NodeKind.CLASS,
     NodeKind.TYPE,
     NodeKind.CONSTANT,
+    NodeKind.API_ENDPOINT,
 })
 
 #: Kinds that represent structural containers (hierarchy embedding targets).
@@ -136,6 +137,10 @@ class Node:
     signature: Optional[str] = None
     docstring: Optional[str] = None
 
+    # API endpoint metadata
+    http_method: Optional[str] = None
+    route_path: Optional[str] = None
+
     # Embedding (stored separately in vector store, cached here for speed)
     embedding: Optional[list[float]] = None
 
@@ -152,9 +157,15 @@ class Node:
 
     @property
     def token_estimate(self) -> int:
-        """Rough token count: ~4 chars per token for code."""
+        """Rough token count: ~4 chars per token for code.
+
+        Includes a fixed overhead for formatting added by
+        ``ContextBundle.format_for_llm`` (code fences, location
+        header, annotation lines, separators).
+        """
         text = self.raw_code or self.summary or ""
-        return max(1, len(text) // 4)
+        _FORMAT_OVERHEAD_TOKENS = 15
+        return max(1, len(text) // 4) + _FORMAT_OVERHEAD_TOKENS
 
     @property
     def has_code(self) -> bool:
@@ -182,6 +193,8 @@ class Node:
             "raw_code": self.raw_code,
             "signature": self.signature,
             "docstring": self.docstring,
+            "http_method": self.http_method,
+            "route_path": self.route_path,
             "last_modified": self.last_modified,
             "modification_count": self.modification_count,
             "last_retrieved": self.last_retrieved,

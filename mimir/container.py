@@ -34,13 +34,13 @@ class Container:
         # Vector store
         self.vector_store = self._build_vector_store()
 
-        # Graph store
+        # Graph store — lives in the tracked project/ folder
         from mimir.infra.stores.sqlite_graph import SqliteGraphStore
-        self.graph_store = SqliteGraphStore(config.data_dir / "graph.db")
+        self.graph_store = SqliteGraphStore(config.project_dir / "graph.db")
 
-        # Session store
+        # Session store — lives in the ignored session/ folder
         from mimir.infra.stores.sqlite_session import SqliteSessionStore
-        self.session_store = SqliteSessionStore(config.data_dir / "sessions.db")
+        self.session_store = SqliteSessionStore(config.session_dir / "sessions.db")
 
         # LLM client (used by the `ask` CLI command for interactive Q&A)
         self.llm_client = self._build_llm_client()
@@ -54,13 +54,6 @@ class Container:
             embedder=self.embedder,
             vector_store=self.vector_store,
             graph_store=self.graph_store,
-        )
-
-        from mimir.services.retrieval import RetrievalService
-        self.retrieval = RetrievalService(
-            config=config,
-            embedder=self.embedder,
-            vector_store=self.vector_store,
         )
 
         from mimir.services.temporal import TemporalService
@@ -81,13 +74,34 @@ class Container:
         from mimir.services.quality import QualityService
         self.quality = QualityService()
 
+        from mimir.services.retrieval import RetrievalService
+        self.retrieval = RetrievalService(
+            config=config,
+            embedder=self.embedder,
+            vector_store=self.vector_store,
+            quality_service=self.quality,
+            temporal_service=self.temporal,
+            graph_store=self.graph_store,
+        )
+
         from mimir.services.catalog import CatalogService
         self.catalog = CatalogService(quality_service=self.quality, config=config)
 
+        # Guardrails
+        from mimir.services.diff_analyzer import DiffAnalyzer
+        self.diff_analyzer = DiffAnalyzer(parser=self.parser)
+
+        from mimir.services.guardrail import GuardrailService
+        self.guardrail = GuardrailService(
+            impact_service=self.impact,
+            quality_service=self.quality,
+            diff_analyzer=self.diff_analyzer,
+        )
+
+        from mimir.services.agent_policy import AgentPolicyService
+        self.agent_policy = AgentPolicyService(impact_service=self.impact)
+
         self.temporal.set_quality_service(self.quality)
-        self.retrieval.set_quality_service(self.quality)
-        self.retrieval.set_temporal_service(self.temporal)
-        self.retrieval.set_graph_store(self.graph_store)
 
     def _build_embedder(self):
         model = self.config.embeddings.model
@@ -106,14 +120,14 @@ class Container:
                 # Default: run locally via sentence-transformers
                 from mimir.infra.embedders.local import LocalEmbedder
                 model_name = model.removeprefix("local:") if model.startswith("local:") else model
-                cache_dir = self.config.embeddings.cache_dir or str(self.config.data_dir / "models")
+                cache_dir = self.config.embeddings.cache_dir or str(self.config.session_dir / "models")
                 logger.info("Using local embedder: %s (cache: %s)", model_name, cache_dir)
                 return LocalEmbedder(model_name=model_name, cache_dir=cache_dir)
         else:
             # Default: run locally via sentence-transformers
             from mimir.infra.embedders.local import LocalEmbedder
             model_name = model.removeprefix("local:") if model.startswith("local:") else model
-            cache_dir = self.config.embeddings.cache_dir or str(self.config.data_dir / "models")
+            cache_dir = self.config.embeddings.cache_dir or str(self.config.session_dir / "models")
             logger.info("Using local embedder: %s (cache: %s)", model_name, cache_dir)
             return LocalEmbedder(model_name=model_name, cache_dir=cache_dir)
 
@@ -123,7 +137,7 @@ class Container:
             from mimir.infra.vector_stores.chroma import ChromaVectorStore
             return ChromaVectorStore(
                 persist_directory=self.config.vector_db.persist_directory
-                or str(self.config.data_dir / "chroma"),
+                or str(self.config.session_dir / "chroma"),
             )
         else:
             from mimir.infra.vector_stores.numpy_store import NumpyVectorStore
@@ -145,7 +159,14 @@ class Container:
         return self._graph
 
     def _hydrate_vector_store(self, graph) -> None:
-        """Populate the in-memory vector store from graph node embeddings."""
+        """Populate the vector store from graph node embeddings.
+
+        Upserts only the delta: ids present in the graph but missing from the
+        store.  Persistent backends (Chroma) that already hold the HNSW index
+        on disk skip the work entirely on warm starts.  ``upsert`` is
+        idempotent in every backend, so the delta optimization is purely a
+        speedup — correctness does not depend on it.
+        """
         from mimir.services.indexing import IndexingService
 
         ids: list[str] = []
@@ -162,15 +183,33 @@ class Container:
                     "kind": node.kind.value,
                     "path": node.path or "",
                     "last_modified": node.last_modified or "",
+                    "http_method": node.http_method or "",
+                    "route_path": node.route_path or "",
                 })
                 documents.append(IndexingService._embedding_text(node, graph))
 
-        if ids:
-            self.vector_store.upsert(
-                ids=ids, embeddings=embeddings,
-                metadatas=metadatas, documents=documents,
+        if not ids:
+            return
+
+        existing = self.vector_store.get_existing_ids(ids)
+        if len(existing) == len(ids):
+            logger.info(
+                "Vector store up to date (%d embeddings) — skipping hydrate", len(ids),
             )
-            logger.info("Hydrated vector store with %d embeddings", len(ids))
+            return
+
+        missing_indices = [i for i, vec_id in enumerate(ids) if vec_id not in existing]
+        self.vector_store.upsert(
+            ids=[ids[i] for i in missing_indices],
+            embeddings=[embeddings[i] for i in missing_indices],
+            metadatas=[metadatas[i] for i in missing_indices],
+            documents=[documents[i] for i in missing_indices],
+        )
+        logger.info(
+            "Hydrated vector store with %d new embeddings (%d already present)",
+            len(missing_indices),
+            len(existing),
+        )
 
     def clear_data(self, *, graph: bool = True, sessions: bool = True) -> dict:
         """Delete all locally stored data.

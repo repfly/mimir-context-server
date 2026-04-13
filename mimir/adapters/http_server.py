@@ -104,6 +104,9 @@ def run_http_server(
                 container.session.session_dedup(
                     sg, session, query_embedding=bundle.query_embedding,
                 )
+                # Re-fit to budget after dedup may have changed node set
+                effective_budget = budget or container.retrieval._config.retrieval.default_token_budget
+                container.retrieval._fit_to_budget(sg, effective_budget, seed_ids=set())
                 bundle.nodes = list(sg.nodes.values())
                 bundle.edges = sg.edges
                 bundle.token_count = sg.token_estimate
@@ -209,6 +212,38 @@ def run_http_server(
             return web.json_response(report.to_dict())
         except Exception as exc:
             logger.error("Drift detection failed: %s", exc, exc_info=True)
+            return web.json_response({"error": str(exc)}, status=500)
+
+    # ------------------------------------------------------------------
+    # Guardrails API
+    # ------------------------------------------------------------------
+
+    @routes.post("/api/v1/guardrails/check")
+    async def api_guardrails_check(request: web.Request) -> web.Response:
+        """Validate a diff against architectural rules."""
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+        diff = body.get("diff")
+        if not diff:
+            return web.json_response({"error": "Missing 'diff' field"}, status=400)
+
+        from pathlib import Path
+        from mimir.domain.guardrails_config import load_rules
+
+        rules_path = Path(body.get("rules_path", "mimir-rules.yaml"))
+        try:
+            rules = load_rules(rules_path)
+        except Exception as exc:
+            return web.json_response({"error": f"Rule loading failed: {exc}"}, status=400)
+
+        try:
+            result = await container.guardrail.evaluate(graph, diff, rules)
+            return web.json_response(result.to_dict())
+        except Exception as exc:
+            logger.error("Guardrail check failed: %s", exc, exc_info=True)
             return web.json_response({"error": str(exc)}, status=500)
 
     # ------------------------------------------------------------------

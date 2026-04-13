@@ -1,0 +1,27 @@
+policies:
+  - name: default-agent
+    description: "Standard AI agent policy — allowed everywhere except critical paths"
+    allow:
+      - "src/**"
+      - "tests/**"
+      - "docs/**"
+    deny:
+      - "src/auth/**"
+      - "src/billing/**"
+      - "infrastructure/**"
+      - "*.config.*"
+      - ".github/**"
+      - "Dockerfile"
+      - "docker-compose.yml"
+    require_review_when:
+      - type: impact_count
+        threshold: 15
+      - type: cross_repo
+      - type: modifies_api
+
+  - name: test-agent
+    description: "Restricted agent — tests only"
+    allow:
+      - "tests/**"
+    deny:
+      - "**"
