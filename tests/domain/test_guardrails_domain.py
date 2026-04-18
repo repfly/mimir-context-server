@@ -283,7 +283,7 @@ class TestLoadRules:
 
     def test_load_example_rules_file(self):
         """Ensure the shipped mimir-rules.yaml parses successfully."""
-        rules_path = Path(__file__).parent.parent / "mimir-rules.yaml"
+        rules_path = Path(__file__).parent.parent.parent / "mimir-rules.yaml"
         if rules_path.exists():
             rules = load_rules(rules_path)
             assert len(rules) > 0

@@ -10,7 +10,7 @@ import pytest
 from mimir.domain.graph import CodeGraph
 from mimir.domain.guardrails import ChangeSet
 from mimir.domain.models import Edge, EdgeKind, Node, NodeKind
-from mimir.services.diff_analyzer import DiffAnalyzer
+from mimir.services.guardrail.diff_analyzer import DiffAnalyzer
 
 
 # ---------------------------------------------------------------------------
