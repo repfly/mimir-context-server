@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mimir.services.guardrail_trailers import parse_approval_trailers
+from mimir.services.guardrail.trailers import parse_approval_trailers
 
 
 class TestParseApprovalTrailers:
