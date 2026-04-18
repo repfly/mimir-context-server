@@ -7,19 +7,18 @@ temporal reranking → budget fitting → topological ordering → ContextBundle
 from __future__ import annotations
 
 import logging
-import math
 import re
-from collections import defaultdict
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 from mimir.domain.config import MimirConfig
 from mimir.domain.graph import CodeGraph
-from mimir.domain.models import SYMBOL_KINDS, Edge, EdgeKind, Node, NodeKind, EDGE_EXPANSION_WEIGHTS
+from mimir.domain.models import Node, NodeKind
 from mimir.domain.subgraph import ContextBundle, SubGraph
 from mimir.ports.embedder import Embedder
 from mimir.ports.vector_store import VectorStore
 from mimir.services.intent import classify_intent, INTENT_PROFILES
+from mimir.services.retrieval.graph_ops import RetrievalGraphOps
+from mimir.services.retrieval.matching import RetrievalMatchingOps
 
 from mimir.ports.graph_store import GraphStore
 
@@ -48,6 +47,32 @@ class RetrievalService:
         self._quality_service = quality_service
         self._temporal_service = temporal_service
         self._graph_store = graph_store
+        self._matching_ops = RetrievalMatchingOps(config, vector_store)
+        self._graph_ops = RetrievalGraphOps(
+            config,
+            quality_service=quality_service,
+            temporal_service=temporal_service,
+            graph_store=graph_store,
+        )
+
+    def _matching_component(self) -> RetrievalMatchingOps:
+        component = getattr(self, "_matching_ops", None)
+        if component is None:
+            component = RetrievalMatchingOps(self._config, getattr(self, "_vector_store", None))
+            self._matching_ops = component
+        return component
+
+    def _graph_component(self) -> RetrievalGraphOps:
+        component = getattr(self, "_graph_ops", None)
+        if component is None:
+            component = RetrievalGraphOps(
+                self._config,
+                quality_service=getattr(self, "_quality_service", None),
+                temporal_service=getattr(self, "_temporal_service", None),
+                graph_store=getattr(self, "_graph_store", None),
+            )
+            self._graph_ops = component
+        return component
 
     async def search(
         self,
@@ -195,7 +220,7 @@ class RetrievalService:
         self._fit_to_budget(subgraph, budget, seed_ids={n.id for n in seed_nodes})
 
         # Step 6: Update retrieval metadata on retrieved nodes
-        self._update_retrieval_metadata(list(subgraph.nodes.values()))
+        self._update_retrieval_metadata(list(subgraph.nodes.values()), graph=graph)
 
         # Step 7: Topological ordering
         ordered = self._topological_order(subgraph)
@@ -217,6 +242,11 @@ class RetrievalService:
 
     _bm25_index = None
     _bm25_node_ids: list[str] = []
+
+    @property
+    def default_token_budget(self) -> int:
+        """Configured default token budget used when none is supplied."""
+        return self._config.retrieval.default_token_budget
 
     def invalidate_bm25(self) -> None:
         """Reset the cached BM25 index, forcing rebuild on next search."""
@@ -305,14 +335,12 @@ class RetrievalService:
         top_k: int = 20,
         where: Optional[dict] = None,
     ) -> list[tuple[Node, float]]:
-        """Flat vector search (none mode)."""
-        results = self._vector_store.search(query_embedding, top_k=top_k, where=where)
-        out: list[tuple[Node, float]] = []
-        for r in results:
-            node = graph.get_node(r.id)
-            if node:
-                out.append((node, r.score))
-        return out
+        return self._matching_component().flat_search(
+            query_embedding,
+            graph,
+            top_k=top_k,
+            where=where,
+        )
 
     def _hierarchical_beam_search(
         self,
@@ -321,73 +349,20 @@ class RetrievalService:
         beam_width: int,
         where: Optional[dict] = None,
     ) -> list[tuple[Node, float]]:
-        """Top-down beam search: repo → module → file → symbol."""
-        candidates: list[tuple[Node, float]] = []
-
-        # Search at each hierarchy level, keeping top-k at each stage
-        for level_kind in [NodeKind.REPOSITORY, NodeKind.MODULE, NodeKind.FILE]:
-            level_results = self._vector_store.search(
-                query_embedding,
-                top_k=beam_width,
-                where={"kind": level_kind.value} if not where else {**(where or {}), "kind": level_kind.value},
-            )
-            # Keep beam_width candidates for next level
-            for r in level_results[:beam_width]:
-                node = graph.get_node(r.id)
-                if node:
-                    candidates.append((node, r.score))
-
-        # Final search at symbol level
-        symbol_results = self._vector_store.search(
+        return self._matching_component().hierarchical_beam_search(
             query_embedding,
-            top_k=beam_width * 3,
+            graph,
+            beam_width,
             where=where,
         )
-        for r in symbol_results:
-            node = graph.get_node(r.id)
-            if node and node.is_symbol:
-                candidates.append((node, r.score))
-
-        # Sort by score, deduplicate
-        seen: set[str] = set()
-        unique: list[tuple[Node, float]] = []
-        for node, score in sorted(candidates, key=lambda x: x[1], reverse=True):
-            if node.id not in seen:
-                seen.add(node.id)
-                unique.append((node, score))
-
-        return unique[:beam_width * 3]
 
     # ------------------------------------------------------------------
     # Name matching
     # ------------------------------------------------------------------
 
-    _STOPWORDS = frozenset({
-        "the", "a", "an", "is", "are", "was", "were", "be", "been",
-        "do", "does", "did", "has", "have", "had", "in", "on", "at",
-        "to", "for", "of", "with", "by", "from", "and", "or", "not",
-        "it", "its", "this", "that", "how", "what", "where", "when",
-        "why", "who", "which", "all", "each", "every", "any", "my",
-        "your", "our", "use", "get", "set", "can", "will", "should",
-        "about", "into", "out", "up", "down", "code", "function",
-        "class", "method", "file", "does", "work", "show", "find",
-    })
-
     @staticmethod
     def _split_name(name: str) -> set[str]:
-        """Split a symbol name into lowercase words.
-
-        Handles camelCase, PascalCase, snake_case, and kebab-case.
-        e.g. "HomeView" → {"home", "view"}
-             "get_user_name" → {"get", "user", "name"}
-        """
-        # Insert boundary before uppercase runs: "HomeView" → "Home View"
-        parts = re.sub(r"([a-z])([A-Z])", r"\1 \2", name)
-        # Split acronym runs: "XMLParser" → "XML Parser"
-        parts = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1 \2", parts)
-        # Split on non-alphanumeric
-        tokens = re.split(r"[^a-zA-Z0-9]+", parts)
-        return {t.lower() for t in tokens if len(t) > 1}
+        return RetrievalMatchingOps.split_name(name)
 
     def _name_match_seeds(
         self,
@@ -395,60 +370,11 @@ class RetrievalService:
         graph: CodeGraph,
         repos: Optional[list[str]] = None,
     ) -> list[tuple[Node, float]]:
-        """Find nodes whose name or path matches words in the query."""
-        # Extract significant words from query
-        query_words = set()
-        for w in query.split():
-            # Also split query words by camelCase in case user writes "HomeView"
-            query_words |= self._split_name(w)
-        query_words = {w for w in query_words if len(w) > 2 and w not in self._STOPWORDS}
-
-        if not query_words:
-            return []
-
-        boost = self._config.retrieval.hybrid_alpha
-        matches: list[tuple[Node, float]] = []
-
-        for node in graph.all_nodes():
-            if repos and node.repo not in repos:
-                continue
-
-            # Split node name into words for matching
-            name_words = self._split_name(node.name)
-            overlap = query_words & name_words
-
-            if overlap:
-                # Score based on fraction of query words matched
-                ratio = len(overlap) / len(query_words)
-                score = boost * (0.5 + 0.5 * ratio)  # range: 0.5*boost → boost
-                matches.append((node, score))
-                continue
-
-            # Path matching: check if query words appear in the file path
-            if node.path:
-                path_lower = node.path.lower()
-                for word in query_words:
-                    if word in path_lower:
-                        matches.append((node, boost * 0.4))
-                        break
-
-        # Sort by score desc, cap results
-        matches.sort(key=lambda x: x[1], reverse=True)
-        return matches[:30]
+        return self._matching_component().name_match_seeds(query, graph, repos)
 
     # ------------------------------------------------------------------
     # Route matching
     # ------------------------------------------------------------------
-
-    _HTTP_METHODS = frozenset({"get", "post", "put", "delete", "patch", "head", "options"})
-
-    _ROUTE_PATTERN = re.compile(
-        r"""
-        (?:(?P<method>GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+)?  # optional HTTP method
-        (?P<path>/[^\s]*)                                           # path starting with /
-        """,
-        re.VERBOSE | re.IGNORECASE,
-    )
 
     def _route_match_seeds(
         self,
@@ -456,54 +382,7 @@ class RetrievalService:
         graph: CodeGraph,
         repos: Optional[list[str]] = None,
     ) -> list[tuple[Node, float]]:
-        """Find API_ENDPOINT nodes whose route matches a path in the query.
-
-        Detects route-shaped patterns like ``/orders``, ``POST /users/{id}``,
-        or ``GET /api/health`` in the query text and matches them against
-        stored ``route_path`` / ``http_method`` on API_ENDPOINT nodes.
-        """
-        match = self._ROUTE_PATTERN.search(query)
-        if not match:
-            return []
-
-        query_method = (match.group("method") or "").upper()
-        query_path = match.group("path").rstrip("/").lower() or "/"
-
-        matches: list[tuple[Node, float]] = []
-        for node in graph.all_nodes():
-            if node.kind != NodeKind.API_ENDPOINT or not node.route_path:
-                continue
-            if repos and node.repo not in repos:
-                continue
-
-            node_path = node.route_path.rstrip("/").lower() or "/"
-            # Strip path params for comparison: /orders/{id} → /orders/
-            node_path_collapsed = re.sub(r'\{[^}]+\}', '{_}', node_path)
-            query_path_collapsed = re.sub(r'\{[^}]+\}', '{_}', query_path)
-
-            if node_path_collapsed != query_path_collapsed:
-                # Also try suffix match: query /orders matches node /api/v1/orders
-                if not (
-                    node_path_collapsed.endswith(query_path_collapsed)
-                    and (
-                        len(node_path_collapsed) == len(query_path_collapsed)
-                        or node_path_collapsed[-len(query_path_collapsed) - 1] == "/"
-                    )
-                ):
-                    continue
-
-            # Path matches — compute score
-            score = 1.0  # high base score for exact route match
-            if query_method and node.http_method:
-                if query_method == node.http_method.upper():
-                    score = 1.2  # method + path match → highest priority
-                else:
-                    score = 0.6  # path matches but wrong method → still relevant
-
-            matches.append((node, score))
-
-        matches.sort(key=lambda x: x[1], reverse=True)
-        return matches
+        return self._matching_component().route_match_seeds(query, graph, repos)
 
     # ------------------------------------------------------------------
     # Subgraph expansion
@@ -519,74 +398,20 @@ class RetrievalService:
         hops: Optional[int] = None,
         gate: Optional[float] = None,
     ) -> SubGraph:
-        """BFS expansion from seeds, following dependency edges."""
-        hops = hops if hops is not None else self._config.retrieval.expansion_hops
-        gate = gate if gate is not None else self._config.retrieval.relevance_gate
-
-        subgraph = SubGraph()
-        for seed in seeds:
-            subgraph.add_node(seed, score=seed_scores.get(seed.id, 1.0))
-
-        frontier = {s.id for s in seeds}
-        visited: set[str] = set()
-
-        for hop in range(hops):
-            next_frontier: set[str] = set()
-            for node_id in frontier:
-                if node_id in visited:
-                    continue
-                visited.add(node_id)
-
-                for edge in graph.get_all_edges_for(node_id):
-                    target_id = edge.target if edge.source == node_id else edge.source
-                    if target_id in visited or target_id in subgraph.node_ids:
-                        # Still add the edge for connectivity
-                        if subgraph.has_node(target_id):
-                            subgraph.add_edge(edge)
-                        continue
-
-                    target = graph.get_node(target_id)
-                    if target is None:
-                        continue
-
-                    # Relevance gate: check if target is related to query
-                    if target.embedding and query_embedding:
-                        sim = self._cosine_similarity(query_embedding, target.embedding)
-                        if sim < gate:
-                            continue
-                    else:
-                        sim = 0.5  # unknown, moderate weight
-
-                    edge_weight = EDGE_EXPANSION_WEIGHTS.get(edge.kind, 0.5)
-                    score = sim * edge_weight
-
-                    subgraph.add_node(target, score=score)
-                    subgraph.add_edge(edge)
-                    next_frontier.add(target_id)
-
-            frontier = next_frontier
-
-        return subgraph
+        return self._graph_component().expand_subgraph(
+            seeds,
+            seed_scores,
+            query_embedding,
+            graph,
+            hops=hops,
+            gate=gate,
+        )
 
     def _add_type_context(self, subgraph: SubGraph, graph: CodeGraph) -> None:
-        """Add type definitions used by nodes in the subgraph."""
-        for node in list(subgraph.nodes.values()):
-            type_edges = graph.get_outgoing_edges(node.id, EdgeKind.USES_TYPE)
-            for edge in type_edges:
-                type_node = graph.get_node(edge.target)
-                if type_node and not subgraph.has_node(type_node.id):
-                    subgraph.add_node(type_node, score=0.3)
-                    subgraph.add_edge(edge)
+        self._graph_component().add_type_context(subgraph, graph)
 
     def _add_config_context(self, subgraph: SubGraph, graph: CodeGraph) -> None:
-        """Add config nodes read by nodes in the subgraph."""
-        for node in list(subgraph.nodes.values()):
-            config_edges = graph.get_outgoing_edges(node.id, EdgeKind.READS_CONFIG)
-            for edge in config_edges:
-                cfg_node = graph.get_node(edge.target)
-                if cfg_node and not subgraph.has_node(cfg_node.id):
-                    subgraph.add_node(cfg_node, score=0.2)
-                    subgraph.add_edge(edge)
+        self._graph_component().add_config_context(subgraph, graph)
 
     # ------------------------------------------------------------------
     # Budget fitting
@@ -598,39 +423,24 @@ class RetrievalService:
         budget: int,
         seed_ids: set[str],
     ) -> None:
-        """Prune least important nodes until subgraph fits in token budget."""
-        while subgraph.token_estimate > budget:
-            # Find least important non-seed leaf
-            candidate = self._find_least_important_leaf(subgraph, seed_ids)
-            if candidate is None:
-                break
+        self._graph_component().fit_to_budget(subgraph, budget, seed_ids)
 
-            # First try: replace code with summary
-            if candidate.raw_code and candidate.summary:
-                candidate.raw_code = None  # keep summary only
-                if subgraph.token_estimate <= budget:
-                    break
-
-            # Still over: remove entirely
-            subgraph.remove_node(candidate.id)
+    def fit_subgraph_to_budget(
+        self,
+        subgraph: SubGraph,
+        budget: int,
+        *,
+        seed_ids: Optional[set[str]] = None,
+    ) -> None:
+        """Public budget-fit wrapper used by transport adapters."""
+        self._fit_to_budget(subgraph, budget, seed_ids=seed_ids or set())
 
     @staticmethod
     def _find_least_important_leaf(
         subgraph: SubGraph,
         seed_ids: set[str],
     ) -> Optional[Node]:
-        """Find the least important non-seed leaf node."""
-        targets = {e.target for e in subgraph.edges}
-        leaves = [
-            n for n in subgraph.nodes.values()
-            if n.id not in seed_ids and n.id not in targets
-        ]
-        if not leaves:
-            # Try non-seed nodes
-            leaves = [n for n in subgraph.nodes.values() if n.id not in seed_ids]
-        if not leaves:
-            return None
-        return min(leaves, key=lambda n: subgraph.scores.get(n.id, 0.0))
+        return RetrievalGraphOps.find_least_important_leaf(subgraph, seed_ids)
 
     # ------------------------------------------------------------------
     # Ordering
@@ -638,69 +448,26 @@ class RetrievalService:
 
     @staticmethod
     def _topological_order(subgraph: SubGraph) -> list[Node]:
-        """Order nodes for LLM comprehension: types → configs → leaves → callers."""
-        nodes = list(subgraph.nodes.values())
-
-        # Group by category
-        types: list[Node] = []
-        configs: list[Node] = []
-        leaves: list[Node] = []
-        others: list[Node] = []
-
-        callee_ids = {e.target for e in subgraph.edges}
-
-        for node in nodes:
-            if node.kind == NodeKind.TYPE:
-                types.append(node)
-            elif node.kind in (NodeKind.CONFIG, NodeKind.CONSTANT):
-                configs.append(node)
-            elif node.id not in callee_ids:
-                leaves.append(node)
-            else:
-                others.append(node)
-
-        # Sort each group by score (most relevant first)
-        key = lambda n: subgraph.scores.get(n.id, 0.0)
-        types.sort(key=key, reverse=True)
-        configs.sort(key=key, reverse=True)
-        others.sort(key=key, reverse=True)
-        leaves.sort(key=key, reverse=True)
-
-        return types + configs + others + leaves
+        return RetrievalGraphOps.topological_order(subgraph)
 
     # ------------------------------------------------------------------
     # Retrieval metadata
     # ------------------------------------------------------------------
 
-    def _update_retrieval_metadata(self, nodes: list[Node]) -> None:
-        """Update retrieval_count, last_retrieved, and co-retrieval on nodes."""
-        now = datetime.now(timezone.utc).isoformat()
-        for node in nodes:
-            node.retrieval_count += 1
-            node.last_retrieved = now
-
-        # Update co-retrieval counts
-        if self._temporal_service is not None:
-            self._temporal_service.update_co_retrieval(nodes)
-
-        # Persist to graph store
-        if self._graph_store is not None:
-            self._graph_store.update_retrieval_metadata(nodes)
+    def _update_retrieval_metadata(
+        self,
+        nodes: list[Node],
+        *,
+        graph: Optional[CodeGraph] = None,
+    ) -> None:
+        self._graph_component().update_retrieval_metadata(nodes, graph=graph)
 
     # ------------------------------------------------------------------
     # Quality adjustment
     # ------------------------------------------------------------------
 
     def _apply_quality_adjustment(self, subgraph: SubGraph, graph: CodeGraph) -> None:
-        """Blend connectivity quality into subgraph scores.
-
-        Adjusts each node's score by blending in its quality score:
-            adjusted = 0.85 * original + 0.15 * quality
-        """
-        for node_id, node in subgraph.nodes.items():
-            original = subgraph.scores.get(node_id, 0.5)
-            quality = self._quality_service.compute_quality_score(node, graph)
-            subgraph.scores[node_id] = 0.85 * original + 0.15 * quality
+        self._graph_component().apply_quality_adjustment(subgraph, graph)
 
     # ------------------------------------------------------------------
     # Utilities
@@ -708,20 +475,8 @@ class RetrievalService:
 
     @staticmethod
     def _cosine_similarity(a: list[float], b: list[float]) -> float:
-        dot = sum(x * y for x, y in zip(a, b))
-        norm_a = math.sqrt(sum(x * x for x in a))
-        norm_b = math.sqrt(sum(x * x for x in b))
-        if norm_a == 0 or norm_b == 0:
-            return 0.0
-        return dot / (norm_a * norm_b)
+        return RetrievalGraphOps.cosine_similarity(a, b)
 
     @staticmethod
     def _generate_summary(subgraph: SubGraph, query: str) -> str:
-        repos = subgraph.repos_involved
-        node_count = len(subgraph.nodes)
-        return (
-            f"Context for: \"{query}\" — {node_count} nodes "
-            f"from {', '.join(repos) if repos else 'unknown'}"
-        )
-
-
+        return RetrievalGraphOps.generate_summary(subgraph, query)

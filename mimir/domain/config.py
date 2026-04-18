@@ -25,12 +25,34 @@ class RepoConfig:
     name: str
     path: Path
     language_hint: Optional[str] = None
+    clone_url: Optional[str] = None
+    branch: str = "main"
+    webhook_repo: Optional[str] = None
 
     def __post_init__(self) -> None:
-        if not self.path.is_dir():
+        if not self.path.is_dir() and not self.clone_url:
             raise ConfigError(
                 f"Repo '{self.name}' path does not exist or is not a directory: {self.path}"
             )
+        if not self.branch.strip():
+            raise ConfigError(f"Repo '{self.name}' branch must not be empty")
+
+
+@dataclass(frozen=True)
+class AdminConfig:
+    webhook_secret_env: Optional[str] = None
+    admin_token_env: Optional[str] = None
+    mirrors_dir: Optional[str] = None
+    enable_repo_sync: bool = False
+    job_history_limit: int = 200
+
+    def __post_init__(self) -> None:
+        if self.enable_repo_sync and not self.webhook_secret_env:
+            raise ConfigError("admin.webhook_secret_env is required when enable_repo_sync = true")
+        if self.admin_token_env is not None and not self.admin_token_env.strip():
+            raise ConfigError("admin.admin_token_env must not be empty")
+        if self.job_history_limit <= 0:
+            raise ConfigError("admin.job_history_limit must be positive")
 
 
 @dataclass(frozen=True)
@@ -152,6 +174,7 @@ class MimirConfig:
     temporal: TemporalConfig = field(default_factory=TemporalConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
     watcher: WatcherConfig = field(default_factory=WatcherConfig)
+    admin: AdminConfig = field(default_factory=AdminConfig)
 
     def __post_init__(self) -> None:
         if not self.repos:
@@ -194,6 +217,9 @@ class MimirConfig:
                     name=r["name"],
                     path=path.parent.joinpath(Path(r["path"]).expanduser()).resolve(),
                     language_hint=r.get("language_hint"),
+                    clone_url=r.get("clone_url"),
+                    branch=r.get("branch", "main"),
+                    webhook_repo=r.get("webhook_repo"),
                 )
                 for r in raw.get("repos", [])
             ]
@@ -217,6 +243,13 @@ class MimirConfig:
                     str(config_dir.joinpath(embeddings.cache_dir).resolve()),
                 )
 
+            admin = _parse_section(AdminConfig, raw.get("admin", {}))
+            if admin.mirrors_dir and not Path(admin.mirrors_dir).is_absolute():
+                object.__setattr__(
+                    admin, "mirrors_dir",
+                    str(config_dir.joinpath(admin.mirrors_dir).resolve()),
+                )
+
             return cls(
                 repos=repos,
                 data_dir=data_dir,
@@ -229,6 +262,7 @@ class MimirConfig:
                 temporal=_parse_section(TemporalConfig, raw.get("temporal", {})),
                 session=_parse_section(SessionConfig, raw.get("session", {})),
                 watcher=_parse_section(WatcherConfig, raw.get("watcher", {})),
+                admin=admin,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ConfigError(f"Invalid config: {exc}") from exc

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from mimir.domain.guardrails import ChangeSet, GuardrailResult, Severity, Violation
-from mimir.services.guardrail_report import (
+from mimir.services.guardrail.report import (
     GuardrailReporter,
     append_audit_entry,
 )

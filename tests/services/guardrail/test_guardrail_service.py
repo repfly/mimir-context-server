@@ -9,7 +9,7 @@ import pytest
 from mimir.domain.graph import CodeGraph
 from mimir.domain.guardrails import ChangeSet, GuardrailResult, Rule, RuleType, Severity, Violation
 from mimir.domain.models import Edge, EdgeKind, Node, NodeKind
-from mimir.services.guardrail import GuardrailService, apply_approvals
+from mimir.services.guardrail.service import GuardrailService, apply_approvals
 from mimir.services.impact import ImpactResult, ImpactService
 from mimir.services.quality import QualityService
 

@@ -23,7 +23,7 @@ from mimir.domain.guardrails import (
     Violation,
 )
 from mimir.domain.models import EdgeKind, NodeKind
-from mimir.services.diff_analyzer import DiffAnalyzer
+from mimir.services.guardrail.diff_analyzer import DiffAnalyzer
 from mimir.services.impact import ImpactService
 from mimir.services.quality import QualityService
 
