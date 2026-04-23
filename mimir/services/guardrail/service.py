@@ -15,7 +15,10 @@ import networkx as nx
 
 from mimir.domain.graph import CodeGraph
 from mimir.domain.guardrails import (
+    ApprovalStatus,
     ChangeSet,
+    CouplingMetric,
+    CycleScope,
     GuardrailResult,
     Rule,
     RuleType,
@@ -198,7 +201,11 @@ class GuardrailService:
         self, graph: CodeGraph, change: ChangeSet, rule: Rule,
     ) -> list[Violation]:
         """Detect cycles introduced by the change."""
-        scope = rule.config["scope"]
+        try:
+            scope = CycleScope(rule.config["scope"])
+        except (KeyError, ValueError):
+            logger.warning("Rule %s has invalid cycle scope %r", rule.id, rule.config.get("scope"))
+            return []
         edge_kinds_config = rule.config.get("edge_kinds", [])
 
         # Determine which edge kinds to include
@@ -210,10 +217,10 @@ class GuardrailService:
                 except ValueError:
                     pass
         else:
-            if scope == "cross_repo":
-                filter_kinds = set(EdgeKind.API_CALLS.value and {
+            if scope is CycleScope.CROSS_REPO:
+                filter_kinds = {
                     EdgeKind.API_CALLS, EdgeKind.SHARED_LIB, EdgeKind.PROTO_DEFINES,
-                })
+                }
             else:
                 filter_kinds = {EdgeKind.IMPORTS}
 
@@ -273,7 +280,11 @@ class GuardrailService:
         self, graph: CodeGraph, change: ChangeSet, rule: Rule,
     ) -> list[Violation]:
         """Check coupling metrics against thresholds."""
-        metric = rule.config["metric"]
+        try:
+            metric = CouplingMetric(rule.config["metric"])
+        except (KeyError, ValueError):
+            logger.warning("Rule %s has invalid coupling metric %r", rule.id, rule.config.get("metric"))
+            return []
         threshold = rule.config["threshold"]
         target_pattern = rule.config.get("target_pattern")
 
@@ -302,11 +313,11 @@ class GuardrailService:
             ca = len(incoming)  # afferent coupling
             ce = len(outgoing)  # efferent coupling
 
-            if metric == "afferent_coupling":
+            if metric is CouplingMetric.AFFERENT_COUPLING:
                 value = ca
-            elif metric == "efferent_coupling":
+            elif metric is CouplingMetric.EFFERENT_COUPLING:
                 value = ce
-            elif metric == "instability":
+            elif metric is CouplingMetric.INSTABILITY:
                 value = ce / (ca + ce) if (ca + ce) > 0 else 0.0
             else:
                 continue
@@ -317,7 +328,7 @@ class GuardrailService:
                     rule_description=rule.description,
                     severity=rule.severity,
                     message=(
-                        f"{metric} for {node.name} is {value} "
+                        f"{metric.value} for {node.name} is {value} "
                         f"(threshold: {threshold})"
                     ),
                     evidence=(
@@ -326,7 +337,7 @@ class GuardrailService:
                         f"efferent_coupling: {ce}",
                     ),
                     file_path=node.path,
-                    suggested_fix=f"Reduce {metric} below {threshold} by refactoring dependencies.",
+                    suggested_fix=f"Reduce {metric.value} below {threshold} by refactoring dependencies.",
                 ))
 
         return violations
@@ -454,11 +465,11 @@ def apply_approvals(
 
         if v.rule_id in effective_approved:
             new_violations.append(
-                dataclasses.replace(v, approval_status="approved")
+                dataclasses.replace(v, approval_status=ApprovalStatus.APPROVED)
             )
         else:
             new_violations.append(
-                dataclasses.replace(v, approval_status="pending")
+                dataclasses.replace(v, approval_status=ApprovalStatus.PENDING)
             )
             pending_count += 1
 
@@ -471,7 +482,7 @@ def apply_approvals(
     warning_count = sum(1 for v in new_violations if v.severity == Severity.WARNING)
     approved_count = sum(
         1 for v in new_violations
-        if v.severity == Severity.BLOCK and v.approval_status == "approved"
+        if v.severity == Severity.BLOCK and v.approval_status is ApprovalStatus.APPROVED
     )
 
     parts: list[str] = []

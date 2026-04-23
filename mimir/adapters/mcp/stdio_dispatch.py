@@ -129,4 +129,14 @@ async def _handle_tool_call(container, graph, request_id, tool_name: str | None,
             )
         return response(request_id, {"content": [{"type": "text", "text": text}]})
 
+    if tool_name == "report_feedback":
+        signal = container.feedback.record_explicit(
+            node_ids=tool_args["node_ids"],
+            outcome=tool_args["outcome"],
+            session_id=tool_args.get("session_id"),
+            query=tool_args.get("query"),
+        )
+        text = f"Feedback recorded: {signal.outcome} for {len(signal.node_ids)} nodes."
+        return response(request_id, {"content": [{"type": "text", "text": text}]})
+
     return error_response(request_id, -32601, f"Unknown tool: {tool_name}")

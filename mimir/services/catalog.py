@@ -23,6 +23,7 @@ from mimir.domain.catalog import (
     CatalogServiceEntry,
     DriftEntry,
     DriftReport,
+    DriftStatus,
     ServiceDependency,
     TechStack,
 )
@@ -135,20 +136,20 @@ class CatalogService:
         for name in declared_names & actual_names:
             confirmed.append(DriftEntry(
                 dependency=name,
-                status="confirmed",
+                status=DriftStatus.CONFIRMED,
                 evidence=tuple(actual_deps[name]),
             ))
 
         for name in declared_names - actual_names:
             missing_in_code.append(DriftEntry(
                 dependency=name,
-                status="missing_in_code",
+                status=DriftStatus.MISSING_IN_CODE,
             ))
 
         for name in actual_names - declared_names:
             undeclared.append(DriftEntry(
                 dependency=name,
-                status="undeclared_in_catalog",
+                status=DriftStatus.UNDECLARED_IN_CATALOG,
                 evidence=tuple(actual_deps[name]),
             ))
 
