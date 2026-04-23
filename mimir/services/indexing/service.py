@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from mimir.domain.config import MimirConfig
+from mimir.domain.config import MimirConfig, SummaryMode
 from mimir.domain.graph import CodeGraph
 from mimir.domain.models import Edge, EdgeKind, Node, NodeKind
 from mimir.ports.embedder import Embedder
@@ -48,7 +48,7 @@ class IndexingService:
         self._graph_builder = IndexingGraphBuilder(config, parser)
         self._embedding_pipeline = IndexingEmbeddingPipeline(config, embedder, vector_store)
 
-    async def index_all(self, *, mode_override: Optional[str] = None) -> CodeGraph:
+    async def index_all(self, *, mode_override: Optional[SummaryMode | str] = None) -> CodeGraph:
         """Run the full indexing pipeline.
 
         1. Parse all repos → build CodeGraph
@@ -58,8 +58,8 @@ class IndexingService:
         5. Embed nodes
         6. Store in vector DB and SQLite
         """
-        mode = mode_override or self._config.indexing.summary_mode
-        logger.info("Starting full index — mode=%s, repos=%d", mode, len(self._config.repos))
+        mode = SummaryMode(mode_override) if mode_override else self._config.indexing.summary_mode
+        logger.info("Starting full index — mode=%s, repos=%d", mode.value, len(self._config.repos))
 
         graph = CodeGraph()
 
@@ -80,7 +80,7 @@ class IndexingService:
         logger.info("Graph built: %s", graph.stats())
 
         # Phase 4: Summarization
-        if mode == "heuristic":
+        if mode is SummaryMode.HEURISTIC:
             generate_heuristic_summaries(graph)
 
         # Phase 5: Embedding
@@ -102,7 +102,7 @@ class IndexingService:
         logger.info("Indexing complete: %d nodes, %d edges", graph.node_count, graph.edge_count)
         return graph
 
-    async def index_incremental(self, *, mode_override: Optional[str] = None) -> tuple[CodeGraph, dict]:
+    async def index_incremental(self, *, mode_override: Optional[SummaryMode | str] = None) -> tuple[CodeGraph, dict]:
         """Incremental index — only re-process files changed since the last commit.
 
         Flow:
@@ -115,8 +115,8 @@ class IndexingService:
 
         Returns (graph, report) where report is a dict summarising the changes.
         """
-        mode = mode_override or self._config.indexing.summary_mode
-        logger.info("Starting incremental index — mode=%s, repos=%d", mode, len(self._config.repos))
+        mode = SummaryMode(mode_override) if mode_override else self._config.indexing.summary_mode
+        logger.info("Starting incremental index — mode=%s, repos=%d", mode.value, len(self._config.repos))
 
         # Load existing graph
         graph = self._graph_store.load()
@@ -328,7 +328,7 @@ class IndexingService:
             detect_shared_imports(graph)
 
         # Phase 6: Summarisation for new/changed nodes only
-        if mode == "heuristic":
+        if mode is SummaryMode.HEURISTIC:
             for node in all_new_nodes:
                 node.summary = heuristic_summary(node, graph)
 
@@ -378,7 +378,7 @@ class IndexingService:
         graph: CodeGraph,
         repo_name: str,
         *,
-        mode_override: Optional[str] = None,
+        mode_override: Optional[SummaryMode | str] = None,
     ) -> dict:
         """Re-index one configured repo into the unified graph.
 
@@ -387,7 +387,7 @@ class IndexingService:
         intact by removing the repo, rebuilding it from disk, then rerunning
         the global linkers over the assembled graph.
         """
-        mode = mode_override or self._config.indexing.summary_mode
+        mode = SummaryMode(mode_override) if mode_override else self._config.indexing.summary_mode
         repo_config = next((r for r in self._config.repos if r.name == repo_name), None)
         if repo_config is None:
             raise ValueError(f"Unknown repo: {repo_name}")
@@ -405,7 +405,7 @@ class IndexingService:
         if self._config.cross_repo.detect_shared_imports:
             detect_shared_imports(graph)
 
-        if mode == "heuristic":
+        if mode is SummaryMode.HEURISTIC:
             generate_heuristic_summaries(graph)
 
         repo_nodes = list(graph.nodes_by_repo(repo_name))

@@ -164,4 +164,32 @@ def tool_definitions() -> list[dict]:
                 "required": ["file_path"],
             },
         },
+        {
+            "name": "report_feedback",
+            "description": "Report whether retrieved context was helpful (positive) or not (negative).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "node_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Node IDs from the retrieved context.",
+                    },
+                    "outcome": {
+                        "type": "string",
+                        "enum": ["positive", "negative"],
+                        "description": "Whether the context was helpful.",
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Optional session ID for context.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "The original query that produced this context.",
+                    },
+                },
+                "required": ["node_ids", "outcome"],
+            },
+        },
     ]

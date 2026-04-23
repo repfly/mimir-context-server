@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from mimir.domain.guardrails import GuardrailResult, Severity
+from mimir.domain.guardrails import ApprovalStatus, GuardrailResult, Severity
 
 
 def _pending_rule_ids(result: GuardrailResult) -> list[str]:
@@ -20,7 +20,7 @@ def _pending_rule_ids(result: GuardrailResult) -> list[str]:
     for v in result.violations:
         if (
             v.severity == Severity.BLOCK
-            and v.approval_status == "pending"
+            and v.approval_status is ApprovalStatus.PENDING
             and v.rule_id not in seen
         ):
             seen.append(v.rule_id)
@@ -58,9 +58,9 @@ class GuardrailReporter:
         if result.violations:
             parts.append("")
             for v in result.violations:
-                if v.severity == Severity.BLOCK and v.approval_status == "approved":
+                if v.severity == Severity.BLOCK and v.approval_status is ApprovalStatus.APPROVED:
                     severity_style = "[green]BLOCK (approved)[/green]"
-                elif v.severity == Severity.BLOCK and v.approval_status == "pending":
+                elif v.severity == Severity.BLOCK and v.approval_status is ApprovalStatus.PENDING:
                     severity_style = "[yellow bold]BLOCK (pending approval)[/yellow bold]"
                 else:
                     severity_style = {
@@ -110,9 +110,9 @@ class GuardrailReporter:
             parts.append("|----------|------|---------|------|")
 
             for v in result.violations:
-                if v.severity == Severity.BLOCK and v.approval_status == "approved":
+                if v.severity == Severity.BLOCK and v.approval_status is ApprovalStatus.APPROVED:
                     severity_badge = "✅ block (approved)"
-                elif v.severity == Severity.BLOCK and v.approval_status == "pending":
+                elif v.severity == Severity.BLOCK and v.approval_status is ApprovalStatus.PENDING:
                     severity_badge = "⏳ block (pending)"
                 else:
                     severity_badge = {

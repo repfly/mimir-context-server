@@ -7,7 +7,9 @@ that trigger mandatory human review.
 from __future__ import annotations
 
 import fnmatch
+import logging
 from dataclasses import dataclass
+from enum import Enum, unique
 from typing import Any, Optional
 
 from mimir.domain.graph import CodeGraph
@@ -15,17 +17,33 @@ from mimir.domain.guardrails import ChangeSet
 from mimir.domain.models import NodeKind
 from mimir.services.impact import ImpactService
 
+logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Domain types (kept here to avoid circular imports with guardrails_config)
 # ---------------------------------------------------------------------------
 
+@unique
+class ReviewConditionType(str, Enum):
+    """Trigger kinds for agent-policy review conditions."""
+
+    IMPACT_COUNT = "impact_count"
+    CROSS_REPO = "cross_repo"
+    MODIFIES_API = "modifies_api"
+
+
 @dataclass(frozen=True)
 class ReviewCondition:
     """Condition that triggers human review requirement."""
 
-    type: str  # "impact_count", "cross_repo", "modifies_api"
+    type: ReviewConditionType
     threshold: Any = None
+
+    def __post_init__(self) -> None:
+        # Coerce string input into ReviewConditionType enum
+        if not isinstance(self.type, ReviewConditionType):
+            object.__setattr__(self, "type", ReviewConditionType(self.type))
 
 
 @dataclass(frozen=True)
@@ -42,8 +60,14 @@ class AgentPolicy:
         """Create from a parsed YAML policy dict."""
         conditions: list[ReviewCondition] = []
         for rc in data.get("require_review_when", []):
+            raw_type = rc.get("type", "")
+            try:
+                condition_type = ReviewConditionType(raw_type)
+            except ValueError:
+                logger.warning("Unknown review condition type %r, skipping", raw_type)
+                continue
             conditions.append(ReviewCondition(
-                type=rc.get("type", ""),
+                type=condition_type,
                 threshold=rc.get("threshold"),
             ))
         return cls(
@@ -93,7 +117,7 @@ class AgentPolicyService:
         reasons: list[str] = []
 
         for condition in policy.require_review_conditions:
-            if condition.type == "impact_count":
+            if condition.type is ReviewConditionType.IMPACT_COUNT:
                 threshold = condition.threshold or 15
                 for node_id in change.modified_nodes:
                     result = self._impact.analyze(graph, node_id=node_id)
@@ -104,13 +128,13 @@ class AgentPolicyService:
                         )
                         break
 
-            elif condition.type == "cross_repo":
+            elif condition.type is ReviewConditionType.CROSS_REPO:
                 for edge in change.new_edges:
                     if edge.is_cross_repo:
                         reasons.append("Change introduces cross-repo dependencies")
                         break
 
-            elif condition.type == "modifies_api":
+            elif condition.type is ReviewConditionType.MODIFIES_API:
                 for node_id in change.modified_nodes:
                     node = graph.get_node(node_id)
                     if node and node.kind == NodeKind.API_ENDPOINT:

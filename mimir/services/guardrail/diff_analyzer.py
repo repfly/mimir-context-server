@@ -11,6 +11,7 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass, field
+from enum import Enum, unique
 from typing import Optional
 
 from mimir.domain.graph import CodeGraph
@@ -25,13 +26,23 @@ logger = logging.getLogger(__name__)
 # Internal types
 # ---------------------------------------------------------------------------
 
+@unique
+class FileDiffStatus(str, Enum):
+    """Change status for a file in a unified diff."""
+
+    ADDED = "added"
+    MODIFIED = "modified"
+    DELETED = "deleted"
+    RENAMED = "renamed"
+
+
 @dataclass
 class _FileDiff:
     """Parsed representation of changes to a single file."""
 
     old_path: str
     new_path: str
-    status: str  # "added", "modified", "deleted", "renamed"
+    status: FileDiffStatus = FileDiffStatus.MODIFIED
     hunks: list[tuple[int, int]] = field(default_factory=list)  # (start, end) in new file
     added_lines: list[str] = field(default_factory=list)
     removed_lines: list[str] = field(default_factory=list)
@@ -73,16 +84,16 @@ class DiffAnalyzer:
         affected_files: list[str] = []
 
         for fd in file_diffs:
-            path = fd.new_path if fd.status != "deleted" else fd.old_path
+            path = fd.new_path if fd.status is not FileDiffStatus.DELETED else fd.old_path
             affected_files.append(path)
 
-            if fd.status == "deleted":
+            if fd.status is FileDiffStatus.DELETED:
                 # Find nodes in the deleted file and mark as modified
                 file_nodes = self._find_nodes_in_file(graph, fd.old_path)
                 modified_nodes.extend(n.id for n in file_nodes)
                 continue
 
-            if fd.status == "added":
+            if fd.status is FileDiffStatus.ADDED:
                 # Extract new symbols from added files
                 extracted = await self._extract_new_symbols(
                     fd.new_path, fd.added_lines, graph,
@@ -131,7 +142,7 @@ class DiffAnalyzer:
                 current = _FileDiff(
                     old_path=m.group(1),
                     new_path=m.group(2),
-                    status="modified",
+                    status=FileDiffStatus.MODIFIED,
                 )
                 current_line = 0
                 hunk_start = 0
@@ -142,18 +153,18 @@ class DiffAnalyzer:
 
             # Binary file — skip
             if _BINARY_PATCH.match(line):
-                current.status = "modified"
+                current.status = FileDiffStatus.MODIFIED
                 continue
 
             # New/deleted file markers
             if _NEW_FILE.match(line):
-                current.status = "added"
+                current.status = FileDiffStatus.ADDED
                 continue
             if _DELETED_FILE.match(line):
-                current.status = "deleted"
+                current.status = FileDiffStatus.DELETED
                 continue
             if _RENAME_FROM.match(line):
-                current.status = "renamed"
+                current.status = FileDiffStatus.RENAMED
                 continue
 
             # Hunk header

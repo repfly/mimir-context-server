@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from mimir.domain.config import MimirConfig
+from mimir.domain.config import MimirConfig, VectorBackend
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,13 @@ class Container:
         # Session store — lives in the ignored session/ folder
         from mimir.infra.stores.sqlite_session import SqliteSessionStore
         self.session_store = SqliteSessionStore(config.session_dir / "sessions.db")
+
+        # Feedback store — lives in the ignored session/ folder
+        from mimir.infra.stores.sqlite_feedback import SqliteFeedbackStore
+        self.feedback_store = SqliteFeedbackStore(
+            config.session_dir / "feedback.db",
+            smoothing=config.feedback.score_smoothing,
+        )
 
         # LLM client (used by the `ask` CLI command for interactive Q&A)
         self.llm_client = self._build_llm_client()
@@ -102,7 +109,15 @@ class Container:
         from mimir.services.agent_policy import AgentPolicyService
         self.agent_policy = AgentPolicyService(impact_service=self.impact)
 
+        from mimir.services.feedback import FeedbackService
+        self.feedback = FeedbackService(
+            config=config,
+            feedback_store=self.feedback_store,
+        )
+
         self.temporal.set_quality_service(self.quality)
+        self.temporal.set_feedback_service(self.feedback)
+        self.session.set_feedback_service(self.feedback)
 
     def _build_embedder(self):
         model = self.config.embeddings.model
@@ -134,7 +149,7 @@ class Container:
 
     def _build_vector_store(self):
         backend = self.config.vector_db.backend
-        if backend == "chroma":
+        if backend is VectorBackend.CHROMA:
             from mimir.infra.vector_stores.chroma import ChromaVectorStore
             return ChromaVectorStore(
                 persist_directory=self.config.vector_db.persist_directory
@@ -239,3 +254,4 @@ class Container:
             self._watcher.stop()
         self.graph_store.close()
         self.session_store.close()
+        self.feedback_store.close()

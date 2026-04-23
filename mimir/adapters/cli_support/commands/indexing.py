@@ -12,6 +12,7 @@ from typing import Optional
 import typer
 
 from mimir.adapters.cli_support.common import DEFAULT_CONFIG, console, load_config, setup_logging
+from mimir.domain.config import VectorBackend
 
 
 def register(app: typer.Typer) -> None:
@@ -47,7 +48,7 @@ def register(app: typer.Typer) -> None:
 
             chroma_dir = cfg.vector_db.persist_directory or str(cfg.session_dir / "chroma")
             chroma_path = Path(chroma_dir)
-            if chroma_path.exists() and cfg.vector_db.backend == "chroma":
+            if chroma_path.exists() and cfg.vector_db.backend is VectorBackend.CHROMA:
                 shutil.rmtree(chroma_path)
                 chroma_path.mkdir(parents=True, exist_ok=True)
 

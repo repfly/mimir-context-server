@@ -6,13 +6,16 @@ import logging
 import math
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from mimir.domain.config import MimirConfig
 from mimir.domain.models import Node
 from mimir.domain.session import Session
 from mimir.domain.subgraph import SubGraph
 from mimir.ports.session_store import SessionStore
+
+if TYPE_CHECKING:
+    from mimir.services.feedback import FeedbackService
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,11 @@ class SessionService:
         self._store = session_store
         self._decay_turns = config.session.context_decay_turns
         self._topic_alpha = config.session.topic_tracking_alpha
+        self._feedback_service: Optional[FeedbackService] = None
+
+    def set_feedback_service(self, feedback_service: FeedbackService) -> None:
+        """Inject the feedback service for implicit signal recording."""
+        self._feedback_service = feedback_service
 
     def get_or_create(self, session_id: Optional[str] = None) -> Session:
         """Load an existing session or create a new one."""
@@ -136,6 +144,12 @@ class SessionService:
         )
         if query_embedding:
             self.update_topic(session, query_embedding)
+        # Record implicit feedback before pruning
+        if self._feedback_service is not None:
+            try:
+                self._feedback_service.record_implicit(session)
+            except Exception:
+                logger.warning("Implicit feedback recording failed", exc_info=True)
         # Prune to prevent unbounded growth before persisting
         session.prune()
         self._store.save(session)

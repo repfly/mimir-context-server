@@ -37,6 +37,31 @@ class Severity(Enum):
     BLOCK = "block"        # block + require human approval (via HEAD commit trailer)
 
 
+@unique
+class ApprovalStatus(str, Enum):
+    """Approval state for BLOCK-severity violations."""
+
+    APPROVED = "approved"
+    PENDING = "pending"
+
+
+@unique
+class CycleScope(str, Enum):
+    """Scope for cycle-detection rules."""
+
+    CROSS_REPO = "cross_repo"
+    INTRA_REPO = "intra_repo"
+
+
+@unique
+class CouplingMetric(str, Enum):
+    """Coupling metrics for metric-threshold rules."""
+
+    AFFERENT_COUPLING = "afferent_coupling"
+    EFFERENT_COUPLING = "efferent_coupling"
+    INSTABILITY = "instability"
+
+
 # ---------------------------------------------------------------------------
 # Rule
 # ---------------------------------------------------------------------------
@@ -86,7 +111,12 @@ class Violation:
     evidence: tuple[str, ...] = ()
     file_path: str | None = None
     suggested_fix: str | None = None
-    approval_status: str | None = None  # "approved", "pending", or None
+    approval_status: ApprovalStatus | None = None
+
+    def __post_init__(self) -> None:
+        # Coerce string input into ApprovalStatus enum
+        if self.approval_status is not None and not isinstance(self.approval_status, ApprovalStatus):
+            object.__setattr__(self, "approval_status", ApprovalStatus(self.approval_status))
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -99,7 +129,7 @@ class Violation:
             "suggested_fix": self.suggested_fix,
         }
         if self.approval_status is not None:
-            d["approval_status"] = self.approval_status
+            d["approval_status"] = self.approval_status.value
         return d
 
 
@@ -144,9 +174,9 @@ class GuardrailResult:
         parts.append("")
         for v in self.violations:
             sev_label = v.severity.value.upper()
-            if v.approval_status == "approved":
+            if v.approval_status is ApprovalStatus.APPROVED:
                 sev_label = "BLOCK - APPROVED"
-            elif v.approval_status == "pending":
+            elif v.approval_status is ApprovalStatus.PENDING:
                 sev_label = "BLOCK - PENDING"
             parts.append(f"### [{sev_label}] {v.rule_id}")
             parts.append(f"**Rule:** {v.rule_description}")

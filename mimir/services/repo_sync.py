@@ -8,6 +8,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
+from enum import Enum, unique
 from hashlib import sha256
 from pathlib import Path
 from typing import Optional
@@ -17,12 +18,22 @@ from mimir.domain.config import MimirConfig, RepoConfig
 logger = logging.getLogger(__name__)
 
 
+@unique
+class JobStatus(str, Enum):
+    """Lifecycle state of a repo sync job."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 @dataclass
 class SyncJob:
     id: str
     repo: str
     commit_sha: Optional[str] = None
-    status: str = "queued"
+    status: JobStatus = JobStatus.QUEUED
     error: Optional[str] = None
     result: dict = field(default_factory=dict)
 
@@ -162,7 +173,7 @@ class RepoSyncQueue:
         existing_id = self._latest_job_by_repo.get(repo)
         if existing_id:
             existing = self._jobs[existing_id]
-            if existing.status == "queued":
+            if existing.status is JobStatus.QUEUED:
                 existing.commit_sha = commit_sha or existing.commit_sha
                 return existing
 
@@ -195,19 +206,19 @@ class RepoSyncQueue:
         while True:
             job_id = await self._queue.get()
             job = self._jobs[job_id]
-            if job.status != "queued":
+            if job.status is not JobStatus.QUEUED:
                 self._queue.task_done()
                 continue
 
-            job.status = "running"
+            job.status = JobStatus.RUNNING
             try:
                 sync_result = await self._sync_service.sync_repo(job.repo, commit_sha=job.commit_sha)
                 index_result = await self._runner(job.repo)
                 job.result = {"sync": sync_result, "index": index_result}
-                job.status = "completed"
+                job.status = JobStatus.COMPLETED
             except Exception as exc:
                 logger.exception("Repo sync job failed for %s", job.repo)
-                job.status = "failed"
+                job.status = JobStatus.FAILED
                 job.error = str(exc)
             finally:
                 self._prune_jobs()
@@ -223,7 +234,7 @@ class RepoSyncQueue:
         removable = [
             job
             for job in self._jobs.values()
-            if job.status in {"completed", "failed"} and job.id not in protected_ids
+            if job.status in {JobStatus.COMPLETED, JobStatus.FAILED} and job.id not in protected_ids
         ]
         removable.sort(key=lambda job: int(job.id.removeprefix("job-")))
         overflow = max(0, len(removable) - self._history_limit)

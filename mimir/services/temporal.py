@@ -13,6 +13,7 @@ from mimir.domain.models import Node
 from mimir.domain.subgraph import SubGraph
 
 if TYPE_CHECKING:
+    from mimir.services.feedback import FeedbackService
     from mimir.services.quality import QualityService
 
 logger = logging.getLogger(__name__)
@@ -26,10 +27,15 @@ class TemporalService:
         self._change_window = config.temporal.change_window_commits
         self._co_retrieval_enabled = config.temporal.co_retrieval_enabled
         self._quality_service: Optional[QualityService] = None
+        self._feedback_service: Optional[FeedbackService] = None
 
     def set_quality_service(self, quality_service: QualityService) -> None:
         """Inject the quality service for connectivity-aware reranking."""
         self._quality_service = quality_service
+
+    def set_feedback_service(self, feedback_service: FeedbackService) -> None:
+        """Inject the feedback service for learned retrieval weights."""
+        self._feedback_service = feedback_service
 
     def temporal_weight(self, node: Node, now: Optional[datetime] = None) -> float:
         """Exponential decay based on last modification time.
@@ -53,18 +59,36 @@ class TemporalService:
     def apply_temporal_weights(
         self, subgraph: SubGraph, graph: Optional[CodeGraph] = None,
     ) -> None:
-        """Rerank nodes in a subgraph using temporal and quality signals.
+        """Rerank nodes in a subgraph using temporal, quality, and feedback signals.
 
-        When a quality service is available and a graph is provided:
+        With quality + feedback:
+            final = 0.40*retrieval + 0.16*recency + 0.10*change_freq
+                  + 0.10*co_retrieval + 0.12*quality + 0.12*feedback
+
+        With quality only:
             final = 0.45*retrieval + 0.18*recency + 0.12*change_freq
                   + 0.12*co_retrieval + 0.13*quality
 
-        Without quality:
+        With feedback only:
+            final = 0.45*retrieval + 0.18*recency + 0.12*change_freq
+                  + 0.12*co_retrieval + 0.13*feedback
+
+        Without quality or feedback:
             final = 0.50*retrieval + 0.20*recency + 0.15*change_freq
                   + 0.15*co_retrieval
         """
         now = datetime.now(timezone.utc)
         use_quality = self._quality_service is not None and graph is not None
+        use_feedback = (
+            self._feedback_service is not None
+            and self._feedback_service.enabled
+        )
+
+        # Pre-fetch feedback weights in bulk if available
+        feedback_weights: dict[str, float] = {}
+        if use_feedback:
+            node_ids = list(subgraph.nodes.keys())
+            feedback_weights = self._feedback_service.get_feedback_weights(node_ids)
 
         for node_id, node in subgraph.nodes.items():
             retrieval_score = subgraph.scores.get(node_id, 0.5)
@@ -72,7 +96,18 @@ class TemporalService:
             change_freq = self._change_frequency_weight(node)
             co_ret = self._co_retrieval_weight(node, subgraph) if self._co_retrieval_enabled else 0.0
 
-            if use_quality:
+            if use_quality and use_feedback:
+                quality = self._quality_service.compute_quality_score(node, graph)
+                feedback = feedback_weights.get(node_id, 0.5)
+                final = (
+                    0.40 * retrieval_score
+                    + 0.16 * recency
+                    + 0.10 * change_freq
+                    + 0.10 * co_ret
+                    + 0.12 * quality
+                    + 0.12 * feedback
+                )
+            elif use_quality:
                 quality = self._quality_service.compute_quality_score(node, graph)
                 final = (
                     0.45 * retrieval_score
@@ -80,6 +115,15 @@ class TemporalService:
                     + 0.12 * change_freq
                     + 0.12 * co_ret
                     + 0.13 * quality
+                )
+            elif use_feedback:
+                feedback = feedback_weights.get(node_id, 0.5)
+                final = (
+                    0.45 * retrieval_score
+                    + 0.18 * recency
+                    + 0.12 * change_freq
+                    + 0.12 * co_ret
+                    + 0.13 * feedback
                 )
             else:
                 final = (

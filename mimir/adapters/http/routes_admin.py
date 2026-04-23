@@ -32,7 +32,7 @@ def register_admin_routes(
             "id": job.id,
             "repo": job.repo,
             "commit_sha": job.commit_sha,
-            "status": job.status,
+            "status": job.status.value,
             "error": job.error,
             "result": job.result,
         })
@@ -48,7 +48,7 @@ def register_admin_routes(
             job = sync_queue.enqueue(request.match_info["repo"], commit_sha=body.get("commit_sha"))
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=404)
-        return web.json_response({"job_id": job.id, "status": job.status}, status=202)
+        return web.json_response({"job_id": job.id, "status": job.status.value}, status=202)
 
     @routes.post("/api/v1/admin/webhooks/git")
     async def api_admin_webhook(request: web.Request) -> web.Response:
@@ -78,4 +78,4 @@ def register_admin_routes(
             })
 
         job = sync_queue.enqueue(repo_config.name, commit_sha=payload.get("commit_sha"))
-        return web.json_response({"job_id": job.id, "repo": repo_config.name, "status": job.status}, status=202)
+        return web.json_response({"job_id": job.id, "repo": repo_config.name, "status": job.status.value}, status=202)
