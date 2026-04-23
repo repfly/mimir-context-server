@@ -10,6 +10,7 @@ from aiohttp import web
 from mimir.adapters.http.admin_auth import require_admin_token
 from mimir.adapters.shared.session_context import apply_session_context
 from mimir.adapters.http.state import HttpServerState
+from mimir.domain.feedback import FeedbackOutcome
 from mimir.domain.guardrails_config import load_rules
 
 logger = logging.getLogger(__name__)
@@ -165,6 +166,48 @@ def register_api_routes(routes: web.RouteTableDef, state: HttpServerState) -> No
         except Exception as exc:
             logger.error("Guardrail check failed: %s", exc, exc_info=True)
             return web.json_response({"error": str(exc)}, status=500)
+
+    @routes.post("/api/v1/feedback")
+    async def api_feedback(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON body"}, status=400)
+
+        node_ids = body.get("node_ids")
+        outcome_raw = body.get("outcome")
+        try:
+            outcome = FeedbackOutcome(outcome_raw) if outcome_raw else None
+        except ValueError:
+            outcome = None
+        if not node_ids or outcome is None:
+            return web.json_response(
+                {"error": "Missing 'node_ids' (list) or invalid 'outcome' (positive|negative)"},
+                status=400,
+            )
+
+        try:
+            signal = state.container.feedback.record_explicit(
+                node_ids=node_ids,
+                outcome=outcome,
+                session_id=body.get("session_id"),
+                query=body.get("query"),
+            )
+            return web.json_response(signal.to_dict())
+        except Exception as exc:
+            logger.error("Feedback recording failed: %s", exc, exc_info=True)
+            return web.json_response({"error": str(exc)}, status=500)
+
+    @routes.get("/api/v1/feedback/stats")
+    async def api_feedback_stats(request: web.Request) -> web.Response:
+        node_id = request.query.get("node_id")
+        if not node_id:
+            return web.json_response({"error": "Missing 'node_id' query param"}, status=400)
+
+        score = state.container.feedback.get_node_score(node_id)
+        if score is None:
+            return web.json_response({"node_id": node_id, "score": 0.5, "status": "no_data"})
+        return web.json_response(score.to_dict())
 
     @routes.post("/api/v1/clear")
     async def api_clear(request: web.Request) -> web.Response:

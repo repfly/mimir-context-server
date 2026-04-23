@@ -6,7 +6,7 @@ import asyncio
 import logging
 from typing import Callable, Optional
 
-from mimir.domain.config import MimirConfig
+from mimir.domain.config import MimirConfig, SummaryMode
 from mimir.domain.graph import CodeGraph
 from mimir.domain.models import EdgeKind, Node
 from mimir.ports.embedder import Embedder
@@ -101,7 +101,7 @@ class IndexingEmbeddingPipeline:
     async def embed_and_upsert(
         self,
         graph: CodeGraph,
-        mode: str,
+        mode: SummaryMode,
         *,
         nodes_to_embed: Optional[list[Node]] = None,
         show_progress: bool = False,
@@ -111,7 +111,7 @@ class IndexingEmbeddingPipeline:
         texts: list[str] = []
         nodes: list[Node] = []
         for node in source:
-            if mode == "none" and not node.is_symbol:
+            if mode is SummaryMode.NONE and not node.is_symbol:
                 continue
             text = self.embedding_text(node, graph) if graph else (node.raw_code or node.summary or node.name)
             if text:

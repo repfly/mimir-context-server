@@ -8,7 +8,17 @@ providers and other service catalog tools.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum, unique
 from typing import Any
+
+
+@unique
+class DriftStatus(str, Enum):
+    """Status of a dependency drift entry."""
+
+    CONFIRMED = "confirmed"
+    MISSING_IN_CODE = "missing_in_code"
+    UNDECLARED_IN_CATALOG = "undeclared_in_catalog"
 
 
 @dataclass(frozen=True)
@@ -154,13 +164,13 @@ class DriftEntry:
     """A single dependency drift finding."""
 
     dependency: str
-    status: str  # "confirmed" | "missing_in_code" | "undeclared_in_catalog"
+    status: DriftStatus
     evidence: tuple[dict[str, str], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "dependency": self.dependency,
-            "status": self.status,
+            "status": self.status.value,
             "evidence": list(self.evidence),
         }
 
