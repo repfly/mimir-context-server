@@ -33,6 +33,7 @@ def _runtime() -> SimpleNamespace:
     graph.add_node(func_node)
     return SimpleNamespace(
         graph=graph,
+        require_graph=lambda: graph,
         write_context=WriteContextService(),
         impact=ImpactService(),
     )

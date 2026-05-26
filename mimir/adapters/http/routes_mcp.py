@@ -11,6 +11,7 @@ from aiohttp import web
 from mimir.adapters.http.state import HttpServerState
 from mimir.adapters.http.tooling import rpc_error, rpc_ok, tool_definitions
 from mimir.adapters.shared.session_context import apply_session_context
+from mimir.domain.errors import NoActiveIndexError
 from mimir.domain.guardrails_config import load_agent_policy, load_rules
 from mimir.services.agent_policy import AgentPolicy
 
@@ -62,7 +63,13 @@ async def _handle_tool_call(
     tool_name: str | None,
     tool_args: dict,
 ) -> web.Response:
-    graph = state.current_graph()
+    try:
+        graph = state.runtime.require_graph()
+    except NoActiveIndexError:
+        return web.json_response(
+            rpc_error(request_id, -32000, "No active index. Run: mimir indexer run"),
+            status=503,
+        )
     if tool_name == "get_context":
         bundle = await state.runtime.retrieval.search(
             query=tool_args["query"],

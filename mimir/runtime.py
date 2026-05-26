@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from mimir.domain.config import MimirConfig, SummaryMode
+from mimir.domain.errors import NoActiveIndexError, StorageError
 from mimir.domain.graph import CodeGraph
 from mimir.domain.index_state import IndexJob, IndexJobKind, IndexVersion
 from mimir.infra.stores.sqlite_feedback import SqliteFeedbackStore
@@ -242,8 +243,18 @@ class QueryRuntime:
             return CodeGraph()
         return self._view.graph
 
+    def require_active_version(self) -> IndexVersion:
+        if self._view is None:
+            raise NoActiveIndexError()
+        return self._view.version
+
+    def require_graph(self) -> CodeGraph:
+        self.require_active_version()
+        return self.graph
+
     @property
     def retrieval(self) -> RetrievalService:
+        self.require_active_version()
         if self._retrieval is None:
             self._retrieval = self._build_retrieval(self._active_vector_store)
         return self._retrieval
@@ -328,6 +339,11 @@ class QueryRuntime:
             self._load_version(active)
 
     def _load_version(self, version: IndexVersion) -> None:
+        graph_path = Path(version.graph_path)
+        if not graph_path.is_file():
+            raise StorageError(f"Active index graph not found: {graph_path}")
+        if version.schema_version != 1:
+            raise StorageError(f"Unsupported index schema version: {version.schema_version}")
         store = SqliteGraphStore(Path(version.graph_path))
         try:
             graph = store.load()

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from mimir.adapters.mcp.stdio_protocol import error_response, initialize_result, response, tool_definitions
 from mimir.adapters.shared.session_context import apply_session_context
+from mimir.domain.errors import NoActiveIndexError
 from mimir.domain.guardrails_config import load_agent_policy, load_rules
 from mimir.services.agent_policy import AgentPolicy
 
@@ -41,7 +42,10 @@ async def handle_request(runtime, workspace_name: str, request: dict) -> dict:
 
 
 async def _handle_tool_call(runtime, request_id, tool_name: str | None, tool_args: dict, workspace_name: str) -> dict:
-    graph = runtime.graph
+    try:
+        graph = runtime.require_graph()
+    except NoActiveIndexError:
+        return error_response(request_id, -32000, "No active index. Run: mimir indexer run")
     if tool_name == "get_context":
         bundle = await runtime.retrieval.search(
             query=tool_args["query"],
