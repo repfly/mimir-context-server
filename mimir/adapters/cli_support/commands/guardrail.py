@@ -77,6 +77,7 @@ def guardrail_check(
     from mimir.services.guardrail import apply_approvals
     from mimir.services.guardrail.report import GuardrailReporter
     from mimir.services.guardrail.trailers import read_head_approval
+    from mimir.domain.errors import NoActiveIndexError
     from mimir.runtime import RuntimeFactory
 
     try:
@@ -103,7 +104,7 @@ def guardrail_check(
     cfg, _ = load_config(config, workspace)
     runtime = RuntimeFactory(cfg).query()
     try:
-        graph = runtime.graph
+        graph = runtime.require_graph()
         result = asyncio.run(runtime.guardrail.evaluate(graph, diff_text, rule_list))
 
         if not no_approvals and any(v.severity.value == "block" for v in result.violations):
@@ -131,6 +132,9 @@ def guardrail_check(
 
         if not result.passed:
             raise typer.Exit(1)
+    except NoActiveIndexError as exc:
+        console.print(f"[red bold]{exc}.[/] Run: mimir indexer run")
+        raise typer.Exit(1) from exc
     finally:
         runtime.close()
 
@@ -173,6 +177,7 @@ def guardrail_test(
     setup_logging(verbose)
 
     from mimir.domain.guardrails_config import load_rules
+    from mimir.domain.errors import NoActiveIndexError
     from mimir.runtime import RuntimeFactory
 
     try:
@@ -193,9 +198,12 @@ def guardrail_test(
 
     runtime = RuntimeFactory(cfg).query()
     try:
-        graph = runtime.graph
+        graph = runtime.require_graph()
         console.print(f"\n[bold]Graph:[/] {graph.node_count} nodes, {graph.edge_count} edges")
         console.print("[green]Rules syntax OK. Ready for guardrail checks.[/]")
+    except NoActiveIndexError as exc:
+        console.print(f"[red bold]{exc}.[/] Run: mimir indexer run")
+        raise typer.Exit(1) from exc
     finally:
         runtime.close()
 

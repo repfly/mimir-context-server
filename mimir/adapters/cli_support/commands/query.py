@@ -16,6 +16,7 @@ from mimir.adapters.cli_support.common import (
     setup_stdio_logging,
     stderr_console,
 )
+from mimir.domain.errors import NoActiveIndexError
 from mimir.runtime import RuntimeFactory
 
 query_app = typer.Typer(
@@ -40,9 +41,10 @@ def search(
     cfg, _ = load_config(config, workspace)
     runtime = RuntimeFactory(cfg).query()
     try:
+        graph = runtime.require_graph()
         bundle = asyncio.run(runtime.retrieval.search(
             query=query,
-            graph=runtime.graph,
+            graph=graph,
             token_budget=budget,
             repos=repos.split(",") if repos else None,
             flat=flat,
@@ -52,6 +54,9 @@ def search(
             console.print(f"[dim]{bundle.session_note}[/]")
         console.print(f"[dim]Tokens: {bundle.token_count}[/]\n")
         console.print(bundle.format_for_llm())
+    except NoActiveIndexError as exc:
+        console.print(f"[red bold]{exc}.[/] Run: mimir indexer run")
+        raise typer.Exit(1) from exc
     except Exception as exc:
         console.print(f"[red bold]Search failed:[/] {exc}")
         raise typer.Exit(1) from exc

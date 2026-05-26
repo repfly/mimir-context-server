@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from textwrap import dedent
+
 from typer.testing import CliRunner
 
 from mimir.adapters.cli import app as shim_app
@@ -49,3 +51,43 @@ def test_guardrail_help_renders() -> None:
     assert "init" in result.stdout
     assert "test" in result.stdout
     assert "approve" in result.stdout
+
+
+def test_query_status_succeeds_without_active_index(tmp_path) -> None:
+    config_path = _write_config(tmp_path)
+
+    result = runner.invoke(shim_app, ["query", "status", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "Active version: -" in result.stdout
+
+
+def test_query_search_fails_without_active_index(tmp_path) -> None:
+    config_path = _write_config(tmp_path)
+
+    result = runner.invoke(shim_app, ["query", "search", "auth", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "No active index" in result.stdout
+    assert "mimir indexer run" in result.stdout
+
+
+def _write_config(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    config_path = tmp_path / "mimir.toml"
+    config_path.write_text(dedent(f"""
+        data_dir = "{tmp_path / '.mimir'}"
+
+        [[repos]]
+        name = "repo"
+        path = "{repo}"
+        language_hint = "python"
+
+        [embeddings]
+        model = "local:test"
+
+        [vector_db]
+        backend = "numpy"
+    """))
+    return config_path

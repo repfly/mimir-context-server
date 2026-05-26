@@ -9,10 +9,18 @@ from aiohttp import web
 
 from mimir.adapters.shared.session_context import apply_session_context
 from mimir.adapters.http.state import HttpServerState
+from mimir.domain.errors import NoActiveIndexError
 from mimir.domain.feedback import FeedbackOutcome
 from mimir.domain.guardrails_config import load_rules
 
 logger = logging.getLogger(__name__)
+
+
+def no_active_index_response() -> web.Response:
+    return web.json_response(
+        {"error": "No active index", "hint": "Run `mimir indexer run` first."},
+        status=503,
+    )
 
 
 def register_api_routes(routes: web.RouteTableDef, state: HttpServerState) -> None:
@@ -44,7 +52,10 @@ def register_api_routes(routes: web.RouteTableDef, state: HttpServerState) -> No
         if not query:
             return web.json_response({"error": "Missing 'query' field"}, status=400)
 
-        graph = state.current_graph()
+        try:
+            graph = state.runtime.require_graph()
+        except NoActiveIndexError:
+            return no_active_index_response()
         try:
             bundle = await state.runtime.retrieval.search(
                 query=query,
@@ -73,13 +84,19 @@ def register_api_routes(routes: web.RouteTableDef, state: HttpServerState) -> No
 
     @routes.get("/api/v1/stats")
     async def api_stats(request: web.Request) -> web.Response:
-        stats = state.current_graph().stats()
+        try:
+            stats = state.runtime.require_graph().stats()
+        except NoActiveIndexError:
+            return no_active_index_response()
         stats["workspace"] = state.workspace_name
         return web.json_response(stats)
 
     @routes.get("/api/v1/hotspots")
     async def api_hotspots(request: web.Request) -> web.Response:
-        graph = state.current_graph()
+        try:
+            graph = state.runtime.require_graph()
+        except NoActiveIndexError:
+            return no_active_index_response()
         top_n = int(request.query.get("top", "20"))
         results = state.runtime.temporal.get_hotspots(graph, top_n=top_n)
         return web.json_response([
@@ -96,7 +113,11 @@ def register_api_routes(routes: web.RouteTableDef, state: HttpServerState) -> No
         file_path = body.get("file_path")
         if not file_path:
             return web.json_response({"error": "Missing 'file_path' field"}, status=400)
-        bundle = state.runtime.write_context.assemble(file_path=file_path, graph=state.current_graph())
+        try:
+            graph = state.runtime.require_graph()
+        except NoActiveIndexError:
+            return no_active_index_response()
+        bundle = state.runtime.write_context.assemble(file_path=file_path, graph=graph)
         return web.json_response({"formatted": bundle.format_for_llm()})
 
     @routes.post("/api/v1/impact")
@@ -105,8 +126,12 @@ def register_api_routes(routes: web.RouteTableDef, state: HttpServerState) -> No
             body = await request.json()
         except Exception:
             return web.json_response({"error": "Invalid JSON body"}, status=400)
+        try:
+            graph = state.runtime.require_graph()
+        except NoActiveIndexError:
+            return no_active_index_response()
         result = state.runtime.impact.analyze(
-            state.current_graph(),
+            graph,
             node_id=body.get("node_id"),
             file_path=body.get("file_path"),
             symbol_name=body.get("symbol_name"),
@@ -118,7 +143,10 @@ def register_api_routes(routes: web.RouteTableDef, state: HttpServerState) -> No
 
     @routes.get("/api/v1/quality")
     async def api_quality(request: web.Request) -> web.Response:
-        graph = state.current_graph()
+        try:
+            graph = state.runtime.require_graph()
+        except NoActiveIndexError:
+            return no_active_index_response()
         repos_param = request.query.get("repos")
         overview = state.runtime.quality.detect_gaps(
             graph,
@@ -130,7 +158,10 @@ def register_api_routes(routes: web.RouteTableDef, state: HttpServerState) -> No
 
     @routes.get("/api/v1/catalog")
     async def api_catalog(request: web.Request) -> web.Response:
-        graph = state.current_graph()
+        try:
+            graph = state.runtime.require_graph()
+        except NoActiveIndexError:
+            return no_active_index_response()
         try:
             repos_param = request.query.get("repos")
             response = state.runtime.catalog.generate_catalog(
@@ -144,7 +175,10 @@ def register_api_routes(routes: web.RouteTableDef, state: HttpServerState) -> No
 
     @routes.get("/api/v1/catalog/{repo}")
     async def api_catalog_service(request: web.Request) -> web.Response:
-        graph = state.current_graph()
+        try:
+            graph = state.runtime.require_graph()
+        except NoActiveIndexError:
+            return no_active_index_response()
         repo = request.match_info["repo"]
         try:
             response = state.runtime.catalog.generate_catalog(graph, repos=[repo])
@@ -166,7 +200,10 @@ def register_api_routes(routes: web.RouteTableDef, state: HttpServerState) -> No
         if not repo:
             return web.json_response({"error": "Missing 'repo' field"}, status=400)
 
-        graph = state.current_graph()
+        try:
+            graph = state.runtime.require_graph()
+        except NoActiveIndexError:
+            return no_active_index_response()
         try:
             report = state.runtime.catalog.detect_drift(
                 graph,
@@ -188,9 +225,12 @@ def register_api_routes(routes: web.RouteTableDef, state: HttpServerState) -> No
         if not diff:
             return web.json_response({"error": "Missing 'diff' field"}, status=400)
         try:
+            graph = state.runtime.require_graph()
             rules = load_rules(Path(body.get("rules_path", "mimir-rules.yaml")))
-            result = await state.runtime.guardrail.evaluate(state.current_graph(), diff, rules)
+            result = await state.runtime.guardrail.evaluate(graph, diff, rules)
             return web.json_response(result.to_dict())
+        except NoActiveIndexError:
+            return no_active_index_response()
         except Exception as exc:
             logger.error("Guardrail check failed: %s", exc, exc_info=True)
             return web.json_response({"error": str(exc)}, status=500)
