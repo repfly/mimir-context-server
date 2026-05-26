@@ -54,9 +54,9 @@ Mimir indexes your code into a hierarchical graph of repositories, files, classe
 pip install mimir-context-server
 cd /your/project
 mimir init          # creates mimir.toml
-mimir index         # builds the semantic code graph
-mimir search "how does authentication work?"
-mimir serve         # start MCP server for your IDE
+mimir indexer run   # builds and publishes the semantic code graph
+mimir query search "how does authentication work?"
+mimir query serve   # start MCP server for your IDE
 
 # Architectural guardrails
 mimir guardrail init                          # generate example rules + agent policy

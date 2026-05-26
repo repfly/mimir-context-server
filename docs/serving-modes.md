@@ -6,8 +6,8 @@ Mimir supports three serving modes via the [Model Context Protocol](https://mode
 
 | Mode | Command | Package needed | Use case |
 |---|---|---|---|
-| **Local stdio MCP** | `mimir serve` | `mimir-context-server` | Solo dev with repos on their machine |
-| **Shared HTTP server** | `mimir serve --http` | `mimir-context-server` | Central team server that indexes all repos |
+| **Local stdio MCP** | `mimir query serve` | `mimir-context-server` | Solo dev querying a published local index |
+| **Shared HTTP server** | `mimir query serve --http` | `mimir-context-server` | Query-only server over the active published index |
 | **Remote MCP proxy** | `mimir-client serve <URL>` | `mimir-client` | Dev without local repos queries a shared server |
 
 ## Local MCP (Default)
@@ -19,23 +19,16 @@ Add to your IDE's MCP config (`~/.cursor/mcp.json` or `claude_desktop_config.jso
   "mcpServers": {
     "mimir": {
       "command": "mimir",
-      "args": ["serve", "--config", "/path/to/your-project/mimir.toml"]
+      "args": ["query", "serve", "--config", "/path/to/your-project/mimir.toml"]
     }
   }
 }
 ```
 
-With live re-indexing:
+Build the local index separately:
 
-```json
-{
-  "mcpServers": {
-    "mimir": {
-      "command": "mimir",
-      "args": ["serve", "--watch", "--config", "/path/to/your-project/mimir.toml"]
-    }
-  }
-}
+```bash
+mimir indexer run --config /path/to/your-project/mimir.toml
 ```
 
 ## MCP Tools
@@ -43,16 +36,15 @@ With live re-indexing:
 | Tool | Description |
 |---|---|
 | `get_context` | Retrieve relevant source code for a natural language query. Call before answering any codebase question. |
-| `get_write_context` | Get everything you need before editing a file: interfaces, sibling implementations, test file, DI registrations, and import graph. |
-| `get_impact` | Analyze what would break if you change a symbol or file: callers, type users, implementors, test files, and transitive dependencies. |
+| `get_write_context` | Get edit-time context for a target file from the active index. |
+| `get_impact` | Analyze what would break if you change a symbol or file. |
 | `get_quality` | Analyze graph connectivity quality and detect gaps — nodes with missing or weak connections that may indicate under-indexed areas. |
 | `get_catalog` | Generate a Backstage-compatible service catalog: services, APIs, dependencies, tech stack, ownership, and quality scores. |
 | `get_catalog_drift` | Compare declared service dependencies against code-analyzed reality. Detects undeclared and missing dependencies with a drift score. |
-| `validate_change` | Validate a code diff against architectural rules (layer violations, cycles, coupling, blast radius, scope bans). Call before committing AI-generated changes. |
+| `validate_change` | Validate a diff against architectural rules using the active index. |
 | `can_i_modify` | Check if a file is within the agent's allowed scope per the agent policy. |
 | `get_graph_stats` | Node/edge counts, breakdown by kind and repo |
 | `get_hotspots` | Recently and frequently modified code |
-| `clear_data` | Wipe the index |
 
 Pass a consistent `session_id` on every turn to enable cross-turn deduplication:
 
@@ -77,8 +69,8 @@ For teams where not everyone has access to all repos — mobile devs needing bac
 │    /repos/ios-app/        (Swift)                              │
 │                                                               │
 │  Runs:                                                        │
-│    mimir index               (cron or CI trigger)             │
-│    mimir serve --http        (always on, port 8421)           │
+│    mimir indexer worker      (queue-driven indexer)           │
+│    mimir query serve --http  (always on, port 8421)           │
 └──────────────────────────────┬────────────────────────────────┘
                                │ HTTP (port 8421)
           ┌────────────────────┼───────────────────┐
@@ -98,8 +90,8 @@ For teams where not everyone has access to all repos — mobile devs needing bac
 ### Server Setup
 
 ```bash
-mimir index --config /repos/mimir.toml
-mimir serve --http --config /repos/mimir.toml
+mimir indexer run --config /repos/mimir.toml
+mimir query serve --http --config /repos/mimir.toml
 # → Listening on http://0.0.0.0:8421
 ```
 
@@ -120,13 +112,14 @@ pipx install mimir-server-client
 }
 ```
 
-> If you have the full `mimir-context-server` installed, `mimir serve --remote http://team-server:8421` also works.
+> If you have the full `mimir-context-server` installed, `mimir query serve --remote http://team-server:8421` also works.
 
 ## HTTP API
 
 | Endpoint | Method | Description |
 |---|---|---|
 | `/api/v1/health` | GET | Health check — returns status, workspace name, node/edge counts |
+| `/api/v1/index/status` | GET | Active published index version, repo commits, and graph counts |
 | `/api/v1/context` | POST | Search — `{"query": "...", "budget": 8000, "repos": ["api"], "session_id": "..."}` |
 | `/api/v1/write_context` | POST | Write-path context — `{"file_path": "src/auth/login.py"}` |
 | `/api/v1/impact` | POST | Impact analysis — `{"symbol_name": "AuthService", "max_hops": 3}` |
@@ -137,7 +130,6 @@ pipx install mimir-server-client
 | `/api/v1/catalog/{repo}` | GET | Single-service catalog entry |
 | `/api/v1/catalog/drift` | POST | Dependency drift detection — `{"repo": "my-api", "declared_dependencies": [{"name": "svc-b"}]}` |
 | `/api/v1/guardrails/check` | POST | Architectural guardrail check — `{"diff": "...", "rules_path": "mimir-rules.yaml"}` |
-| `/api/v1/clear` | POST | Clear index data — `{"graph": true, "sessions": true}` |
 | `/api/v1/mcp` | POST | Raw MCP JSON-RPC passthrough (used by `--remote` proxy) |
 
 See also: [Docker](docker.md) for containerized deployment, [Configuration](configuration.md) for `mimir.toml`.

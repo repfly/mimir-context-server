@@ -44,10 +44,6 @@ co_retrieval_enabled = true
 context_decay_turns = 5
 topic_tracking_alpha = 0.3
 
-[watcher]
-enabled = false              # set to true or use --watch flag
-debounce_ms = 1000           # ms to wait after last file event before processing
-batch_window_ms = 2000       # max ms to accumulate changes before forcing a flush
 ```
 
 ## Reference
@@ -65,8 +61,5 @@ batch_window_ms = 2000       # max ms to accumulate changes before forcing a flu
 | `retrieval` | `relevance_gate` | `0.3` | Minimum score to include expanded nodes |
 | `temporal` | `recency_lambda` | `0.02` | Exponential decay rate for recency scoring |
 | `session` | `context_decay_turns` | `5` | Turns before previously-sent code is re-included fully |
-| `watcher` | `enabled` | `false` | Enable live file watching for automatic re-indexing |
-| `watcher` | `debounce_ms` | `1000` | Debounce delay after the last file event |
-| `watcher` | `batch_window_ms` | `2000` | Maximum time to accumulate changes before flushing |
 
 See also: [How It Works](how-it-works.md) for what each setting controls, [Docker](docker.md) for environment variable overrides.

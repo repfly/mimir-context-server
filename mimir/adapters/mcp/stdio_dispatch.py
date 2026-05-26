@@ -14,7 +14,7 @@ from mimir.services.agent_policy import AgentPolicy
 logger = logging.getLogger(__name__)
 
 
-async def handle_request(container, graph, workspace_name: str, request: dict) -> dict:
+async def handle_request(runtime, workspace_name: str, request: dict) -> dict:
     method = request.get("method", "")
     params = request.get("params", {})
     request_id = request.get("id")
@@ -34,22 +34,23 @@ async def handle_request(container, graph, workspace_name: str, request: dict) -
 
         tool_name = params.get("name")
         tool_args = params.get("arguments", {})
-        return await _handle_tool_call(container, graph, request_id, tool_name, tool_args, workspace_name)
+        return await _handle_tool_call(runtime, request_id, tool_name, tool_args, workspace_name)
     except Exception as exc:
         logger.error("MCP request failed: %s", exc, exc_info=True)
         return error_response(request_id, -32000, str(exc))
 
 
-async def _handle_tool_call(container, graph, request_id, tool_name: str | None, tool_args: dict, workspace_name: str) -> dict:
+async def _handle_tool_call(runtime, request_id, tool_name: str | None, tool_args: dict, workspace_name: str) -> dict:
+    graph = runtime.graph
     if tool_name == "get_context":
-        bundle = await container.retrieval.search(
+        bundle = await runtime.retrieval.search(
             query=tool_args["query"],
             graph=graph,
             token_budget=tool_args.get("budget"),
             repos=tool_args.get("repos"),
         )
         apply_session_context(
-            container,
+            runtime,
             bundle,
             query=tool_args["query"],
             session_id=tool_args.get("session_id"),
@@ -63,16 +64,16 @@ async def _handle_tool_call(container, graph, request_id, tool_name: str | None,
         return response(request_id, {"content": [{"type": "text", "text": json.dumps(stats, indent=2)}]})
 
     if tool_name == "get_hotspots":
-        results = container.temporal.get_hotspots(graph, top_n=tool_args.get("top_n", 20))
+        results = runtime.temporal.get_hotspots(graph, top_n=tool_args.get("top_n", 20))
         payload = [{"node": node.id, "score": f"{score:.3f}", "changes": node.modification_count} for node, score in results]
         return response(request_id, {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}]})
 
     if tool_name == "get_write_context":
-        write_context = container.write_context.assemble(file_path=tool_args["file_path"], graph=graph)
+        write_context = runtime.write_context.assemble(file_path=tool_args["file_path"], graph=graph)
         return response(request_id, {"content": [{"type": "text", "text": write_context.format_for_llm()}]})
 
     if tool_name == "get_impact":
-        result = container.impact.analyze(
+        result = runtime.impact.analyze(
             graph,
             node_id=tool_args.get("node_id"),
             file_path=tool_args.get("file_path"),
@@ -83,7 +84,7 @@ async def _handle_tool_call(container, graph, request_id, tool_name: str | None,
         return response(request_id, {"content": [{"type": "text", "text": text}]})
 
     if tool_name == "get_quality":
-        overview = container.quality.detect_gaps(
+        overview = runtime.quality.detect_gaps(
             graph,
             repos=tool_args.get("repos"),
             threshold=tool_args.get("threshold"),
@@ -92,11 +93,11 @@ async def _handle_tool_call(container, graph, request_id, tool_name: str | None,
         return response(request_id, {"content": [{"type": "text", "text": overview.format_for_llm()}]})
 
     if tool_name == "get_catalog":
-        catalog = container.catalog.generate_catalog(graph, repos=tool_args.get("repos"))
+        catalog = runtime.catalog.generate_catalog(graph, repos=tool_args.get("repos"))
         return response(request_id, {"content": [{"type": "text", "text": catalog.format_for_llm()}]})
 
     if tool_name == "get_catalog_drift":
-        report = container.catalog.detect_drift(
+        report = runtime.catalog.detect_drift(
             graph,
             repo=tool_args["repo"],
             declared_deps=tool_args.get("declared_dependencies", []),
@@ -106,7 +107,7 @@ async def _handle_tool_call(container, graph, request_id, tool_name: str | None,
     if tool_name == "validate_change":
         rules_path = Path(tool_args.get("rules_path", "mimir-rules.yaml"))
         rules = load_rules(rules_path)
-        result = await container.guardrail.evaluate(graph, tool_args["diff"], rules)
+        result = await runtime.guardrail.evaluate(graph, tool_args["diff"], rules)
         return response(request_id, {"content": [{"type": "text", "text": result.format_for_llm()}]})
 
     if tool_name == "can_i_modify":
@@ -119,18 +120,18 @@ async def _handle_tool_call(container, graph, request_id, tool_name: str | None,
 
         file_path = tool_args["file_path"]
         if policy is None:
-            text = f"File: {file_path}\nNo agent policy found — allowed by default."
+            text = f"File: {file_path}\nNo agent policy found - allowed by default."
         else:
-            allowed = container.agent_policy.check_file_access(policy, file_path)
+            allowed = runtime.agent_policy.check_file_access(policy, file_path)
             text = (
                 f"File: {file_path}\n"
                 f"Policy: {policy.name}\n"
-                f"Allowed: {'yes' if allowed else 'NO — outside agent scope'}"
+                f"Allowed: {'yes' if allowed else 'NO - outside agent scope'}"
             )
         return response(request_id, {"content": [{"type": "text", "text": text}]})
 
     if tool_name == "report_feedback":
-        signal = container.feedback.record_explicit(
+        signal = runtime.feedback.record_explicit(
             node_ids=tool_args["node_ids"],
             outcome=tool_args["outcome"],
             session_id=tool_args.get("session_id"),

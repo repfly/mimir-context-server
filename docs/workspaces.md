@@ -11,11 +11,11 @@ mimir workspace add mobile-app   --config /work/mobile/mimir.toml
 mimir workspace list
 
 # Index each
-mimir index --workspace payment-api
-mimir index --workspace mobile-app
+mimir indexer run --workspace payment-api
+mimir indexer run --workspace mobile-app
 
 # Search a specific workspace
-mimir search "auth flow" --workspace payment-api
+mimir query search "auth flow" --workspace payment-api
 ```
 
 MCP config — each server is locked to one workspace:
@@ -23,8 +23,8 @@ MCP config — each server is locked to one workspace:
 ```json
 {
   "mcpServers": {
-    "mimir-payment":  {"command": "mimir", "args": ["serve", "--workspace", "payment-api"]},
-    "mimir-mobile":   {"command": "mimir", "args": ["serve", "--workspace", "mobile-app"]}
+    "mimir-payment":  {"command": "mimir", "args": ["query", "serve", "--workspace", "payment-api"]},
+    "mimir-mobile":   {"command": "mimir", "args": ["query", "serve", "--workspace", "mobile-app"]}
   }
 }
 ```

@@ -16,6 +16,10 @@ def register_routes(routes: web.RouteTableDef, state: WebServerState) -> None:
     async def api_stats(request: web.Request) -> web.Response:
         return web.json_response(state.current_graph().stats())
 
+    @routes.get("/api/index/status")
+    async def api_index_status(request: web.Request) -> web.Response:
+        return web.json_response(state.runtime.status())
+
     @routes.get("/api/nodes")
     async def api_nodes(request: web.Request) -> web.Response:
         graph = state.current_graph()
@@ -82,7 +86,7 @@ def register_routes(routes: web.RouteTableDef, state: WebServerState) -> None:
         budget = int(request.query.get("budget", "4000"))
         repo_filter = request.query.get("repo")
         repos = [repo_filter] if repo_filter else None
-        bundle = await state.container.retrieval.search(
+        bundle = await state.runtime.retrieval.search(
             query=query,
             graph=graph,
             token_budget=budget,
@@ -100,35 +104,20 @@ def register_routes(routes: web.RouteTableDef, state: WebServerState) -> None:
     async def api_hotspots(request: web.Request) -> web.Response:
         graph = state.current_graph()
         top_n = int(request.query.get("top", "20"))
-        results = state.container.temporal.get_hotspots(graph, top_n=top_n)
+        results = state.runtime.temporal.get_hotspots(graph, top_n=top_n)
         return web.json_response([{"node": node.to_dict(), "score": round(score, 4)} for node, score in results])
 
     @routes.get("/api/quality")
     async def api_quality(request: web.Request) -> web.Response:
         graph = state.current_graph()
         repos_param = request.query.get("repos")
-        overview = state.container.quality.detect_gaps(
+        overview = state.runtime.quality.detect_gaps(
             graph,
             repos=repos_param.split(",") if repos_param else None,
             threshold=float(request.query.get("threshold", "0.3")),
             top_n=int(request.query.get("top_n", "50")),
         )
         return web.json_response(overview.to_dict())
-
-    @routes.delete("/api/clear")
-    async def api_clear(request: web.Request) -> web.Response:
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-
-        result = state.container.clear_data(
-            graph=body.get("graph", True),
-            sessions=body.get("sessions", True),
-        )
-        if body.get("graph", True):
-            state.reload_graph()
-        return web.json_response(result)
 
     @routes.get("/")
     async def index(request: web.Request) -> web.FileResponse:

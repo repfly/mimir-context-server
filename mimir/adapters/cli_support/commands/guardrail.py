@@ -77,7 +77,7 @@ def guardrail_check(
     from mimir.services.guardrail import apply_approvals
     from mimir.services.guardrail.report import GuardrailReporter
     from mimir.services.guardrail.trailers import read_head_approval
-    from mimir.container import Container
+    from mimir.runtime import RuntimeFactory
 
     try:
         rule_list = load_rules(rules)
@@ -101,10 +101,10 @@ def guardrail_check(
         raise typer.Exit(0)
 
     cfg, _ = load_config(config, workspace)
-    container = Container(cfg)
+    runtime = RuntimeFactory(cfg).query()
     try:
-        graph = container.load_graph()
-        result = asyncio.run(container.guardrail.evaluate(graph, diff_text, rule_list))
+        graph = runtime.graph
+        result = asyncio.run(runtime.guardrail.evaluate(graph, diff_text, rule_list))
 
         if not no_approvals and any(v.severity.value == "block" for v in result.violations):
             head_approval = read_head_approval(head)
@@ -132,7 +132,7 @@ def guardrail_check(
         if not result.passed:
             raise typer.Exit(1)
     finally:
-        container.close()
+        runtime.close()
 
 
 @guardrail_app.command("init")
@@ -173,7 +173,7 @@ def guardrail_test(
     setup_logging(verbose)
 
     from mimir.domain.guardrails_config import load_rules
-    from mimir.container import Container
+    from mimir.runtime import RuntimeFactory
 
     try:
         rule_list = load_rules(rules)
@@ -191,13 +191,13 @@ def guardrail_test(
         console.print("\n[yellow]No config found — skipping graph analysis.[/]")
         return
 
-    container = Container(cfg)
+    runtime = RuntimeFactory(cfg).query()
     try:
-        graph = container.load_graph()
+        graph = runtime.graph
         console.print(f"\n[bold]Graph:[/] {graph.node_count} nodes, {graph.edge_count} edges")
         console.print("[green]Rules syntax OK. Ready for guardrail checks.[/]")
     finally:
-        container.close()
+        runtime.close()
 
 
 @guardrail_app.command("approve")
