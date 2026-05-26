@@ -1,20 +1,15 @@
-"""Mutable state for the web inspector adapter."""
+"""State for the read-only web inspector adapter."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from mimir.container import Container
+from mimir.runtime import QueryRuntime
 
 
 @dataclass
 class WebServerState:
-    container: Container
-    graph: object
+    runtime: QueryRuntime
 
     def current_graph(self):
-        return self.graph
-
-    def reload_graph(self) -> object:
-        self.graph = self.container.load_graph(force_reload=True)
-        return self.graph
+        return self.runtime.graph

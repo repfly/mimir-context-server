@@ -15,8 +15,23 @@ def test_cli_shim_exports_same_app_instance() -> None:
 def test_root_help_lists_expected_commands() -> None:
     result = runner.invoke(shim_app, ["--help"])
     assert result.exit_code == 0
-    for command in ("index", "search", "graph", "hotspots", "quality", "serve", "ui", "clear", "vacuum", "ask", "init", "workspace", "guardrail"):
+    for command in ("init", "workspace", "guardrail", "indexer", "query"):
         assert command in result.stdout
+
+
+def test_indexer_and_query_help_render() -> None:
+    indexer = runner.invoke(shim_app, ["indexer", "--help"])
+    query = runner.invoke(shim_app, ["query", "--help"])
+
+    assert indexer.exit_code == 0
+    assert "run" in indexer.stdout
+    assert "sync" in indexer.stdout
+    assert "worker" in indexer.stdout
+    assert query.exit_code == 0
+    assert "search" in query.stdout
+    assert "serve" in query.stdout
+    assert "status" in query.stdout
+    assert "ui" in query.stdout
 
 
 def test_workspace_help_renders() -> None:

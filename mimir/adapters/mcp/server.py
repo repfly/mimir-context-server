@@ -8,8 +8,8 @@ import logging
 import sys
 
 from mimir.adapters.mcp.stdio_dispatch import handle_request
-from mimir.container import Container
 from mimir.domain.config import MimirConfig
+from mimir.runtime import RuntimeFactory
 
 logger = logging.getLogger(__name__)
 
@@ -17,35 +17,25 @@ logger = logging.getLogger(__name__)
 def run_mcp_server(config: MimirConfig, workspace_name: str | None = None) -> None:
     """Start the MCP stdio server."""
     ws_label = workspace_name or "default"
-    container = Container(config)
-    graph = container.load_graph()
-    container.warmup()
+    runtime = RuntimeFactory(config).query()
+    graph = runtime.graph
     logger.info("MCP server starting — workspace=%s, graph has %d nodes", ws_label, graph.node_count)
 
     try:
-        asyncio.run(_main_loop(container, graph, ws_label, watcher_enabled=config.watcher.enabled))
+        asyncio.run(_main_loop(runtime, ws_label))
     finally:
-        container.close()
+        runtime.close()
 
 
 async def _main_loop(
-    container: Container,
-    graph,
+    runtime,
     workspace_name: str,
-    *,
-    watcher_enabled: bool,
 ) -> None:
     """Read JSON-RPC messages from stdin and write responses to stdout."""
     reader = asyncio.StreamReader()
     protocol = asyncio.StreamReaderProtocol(reader)
     loop = asyncio.get_event_loop()
     await loop.connect_read_pipe(lambda: protocol, sys.stdin)
-
-    if watcher_enabled:
-        try:
-            container.watcher.start(loop)
-        except Exception as exc:
-            logger.error("Failed to start file watcher: %s", exc)
 
     write_transport, _ = await loop.connect_write_pipe(asyncio.streams.FlowControlMixin, sys.stdout)
 
@@ -59,7 +49,7 @@ async def _main_loop(
             buffer = await _drain_messages(
                 buffer,
                 write_transport,
-                lambda request: handle_request(container, graph, workspace_name, request),
+                lambda request: handle_request(runtime, workspace_name, request),
             )
         except asyncio.CancelledError:
             break

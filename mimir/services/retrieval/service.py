@@ -40,6 +40,7 @@ class RetrievalService:
         quality_service: Optional[QualityService] = None,
         temporal_service: Optional[TemporalService] = None,
         graph_store: Optional[GraphStore] = None,
+        record_retrieval_metadata: bool = True,
     ) -> None:
         self._config = config
         self._embedder = embedder
@@ -47,6 +48,7 @@ class RetrievalService:
         self._quality_service = quality_service
         self._temporal_service = temporal_service
         self._graph_store = graph_store
+        self._record_retrieval_metadata = record_retrieval_metadata
         self._matching_ops = RetrievalMatchingOps(config, vector_store)
         self._graph_ops = RetrievalGraphOps(
             config,
@@ -460,6 +462,8 @@ class RetrievalService:
         *,
         graph: Optional[CodeGraph] = None,
     ) -> None:
+        if not self._record_retrieval_metadata:
+            return
         self._graph_component().update_retrieval_metadata(nodes, graph=graph)
 
     # ------------------------------------------------------------------

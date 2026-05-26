@@ -62,6 +62,30 @@ def tool_definitions() -> list[dict]:
             },
         },
         {
+            "name": "get_write_context",
+            "description": "Collect edit-time context for a target file.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "File path or suffix to inspect."},
+                },
+                "required": ["file_path"],
+            },
+        },
+        {
+            "name": "get_impact",
+            "description": "Analyze the blast radius of a file or symbol change.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "node_id": {"type": "string", "description": "Target node ID when available."},
+                    "file_path": {"type": "string", "description": "File path to narrow the target."},
+                    "symbol_name": {"type": "string", "description": "Symbol name to analyze."},
+                    "max_hops": {"type": "integer", "description": "Maximum transitive depth. Default: 3."},
+                },
+            },
+        },
+        {
             "name": "get_quality",
             "description": "Analyze graph connectivity quality and detect gaps — nodes with missing connections.",
             "inputSchema": {
@@ -112,6 +136,30 @@ def tool_definitions() -> list[dict]:
                     },
                 },
                 "required": ["repo", "declared_dependencies"],
+            },
+        },
+        {
+            "name": "validate_change",
+            "description": "Validate a diff against architectural guardrails.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "diff": {"type": "string", "description": "Unified diff text."},
+                    "rules_path": {"type": "string", "description": "Path to guardrail rules."},
+                },
+                "required": ["diff"],
+            },
+        },
+        {
+            "name": "can_i_modify",
+            "description": "Check whether a file is within the current agent policy.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string", "description": "Path to check."},
+                    "policy_path": {"type": "string", "description": "Path to mimir-agent-policy.yaml."},
+                },
+                "required": ["file_path"],
             },
         },
     ]
