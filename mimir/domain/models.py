@@ -8,7 +8,7 @@ outside the domain on dedicated service-level structures.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum, unique
 from typing import Any, Optional
 
@@ -201,6 +201,14 @@ class Node:
             "retrieval_count": self.retrieval_count,
             "co_retrieved_with": self.co_retrieved_with,
         }
+
+    def clone(self) -> Node:
+        """Return a detached copy safe for request-scoped mutations."""
+        return replace(
+            self,
+            embedding=list(self.embedding) if self.embedding is not None else None,
+            co_retrieved_with=dict(self.co_retrieved_with),
+        )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Node:

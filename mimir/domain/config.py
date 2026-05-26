@@ -8,12 +8,29 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from enum import Enum, unique
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Optional
 
 from mimir.domain.errors import ConfigError
 
 logger = logging.getLogger(__name__)
+
+
+@unique
+class SummaryMode(str, Enum):
+    """How Mimir generates per-node summaries during indexing."""
+
+    NONE = "none"
+    HEURISTIC = "heuristic"
+
+
+@unique
+class VectorBackend(str, Enum):
+    """Supported vector-store backends."""
+
+    CHROMA = "chroma"
+    NUMPY = "numpy"
 
 
 # ---------------------------------------------------------------------------
@@ -25,12 +42,34 @@ class RepoConfig:
     name: str
     path: Path
     language_hint: Optional[str] = None
+    clone_url: Optional[str] = None
+    branch: str = "main"
+    webhook_repo: Optional[str] = None
 
     def __post_init__(self) -> None:
-        if not self.path.is_dir():
+        if not self.path.is_dir() and not self.clone_url:
             raise ConfigError(
                 f"Repo '{self.name}' path does not exist or is not a directory: {self.path}"
             )
+        if not self.branch.strip():
+            raise ConfigError(f"Repo '{self.name}' branch must not be empty")
+
+
+@dataclass(frozen=True)
+class AdminConfig:
+    webhook_secret_env: Optional[str] = None
+    admin_token_env: Optional[str] = None
+    mirrors_dir: Optional[str] = None
+    enable_repo_sync: bool = False
+    job_history_limit: int = 200
+
+    def __post_init__(self) -> None:
+        if self.enable_repo_sync and not self.webhook_secret_env:
+            raise ConfigError("admin.webhook_secret_env is required when enable_repo_sync = true")
+        if self.admin_token_env is not None and not self.admin_token_env.strip():
+            raise ConfigError("admin.admin_token_env must not be empty")
+        if self.job_history_limit <= 0:
+            raise ConfigError("admin.job_history_limit must be positive")
 
 
 @dataclass(frozen=True)
@@ -42,7 +81,7 @@ class CrossRepoConfig:
 
 @dataclass(frozen=True)
 class IndexingConfig:
-    summary_mode: Literal["none", "heuristic"] = "heuristic"
+    summary_mode: SummaryMode = SummaryMode.HEURISTIC
     excluded_patterns: list[str] = field(default_factory=lambda: [
         "*.test.*", "*.spec.*", "__pycache__", "node_modules", ".git", "venv",
         ".venv", "dist", "build", ".tox", ".mypy_cache", ".pytest_cache",
@@ -51,8 +90,12 @@ class IndexingConfig:
     concurrency: int = 10
 
     def __post_init__(self) -> None:
-        if self.summary_mode not in ("none", "heuristic"):
-            raise ConfigError(f"Invalid summary_mode: {self.summary_mode!r}")
+        # Coerce string input (e.g. from TOML) into SummaryMode enum
+        if not isinstance(self.summary_mode, SummaryMode):
+            try:
+                object.__setattr__(self, "summary_mode", SummaryMode(self.summary_mode))
+            except ValueError as exc:
+                raise ConfigError(f"Invalid summary_mode: {self.summary_mode!r}") from exc
         if self.max_file_size_kb <= 0:
             raise ConfigError("max_file_size_kb must be positive")
         if self.concurrency <= 0:
@@ -83,8 +126,15 @@ class EmbeddingConfig:
 
 @dataclass(frozen=True)
 class VectorDbConfig:
-    backend: Literal["chroma", "numpy"] = "chroma"
+    backend: VectorBackend = VectorBackend.CHROMA
     persist_directory: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.backend, VectorBackend):
+            try:
+                object.__setattr__(self, "backend", VectorBackend(self.backend))
+            except ValueError as exc:
+                raise ConfigError(f"Invalid vector_db.backend: {self.backend!r}") from exc
 
 
 @dataclass(frozen=True)
@@ -115,6 +165,25 @@ class TemporalConfig:
 class SessionConfig:
     context_decay_turns: int = 5
     topic_tracking_alpha: float = 0.3
+
+
+@dataclass(frozen=True)
+class FeedbackConfig:
+    """Configuration for the retrieval feedback loop."""
+
+    enabled: bool = True
+    implicit_signals: bool = True
+    implicit_positive_weight: float = 0.3
+    implicit_negative_weight: float = 0.5
+    score_smoothing: int = 2
+
+    def __post_init__(self) -> None:
+        if self.score_smoothing < 1:
+            raise ConfigError("feedback.score_smoothing must be >= 1")
+        if not 0.0 <= self.implicit_positive_weight <= 1.0:
+            raise ConfigError("feedback.implicit_positive_weight must be between 0.0 and 1.0")
+        if not 0.0 <= self.implicit_negative_weight <= 1.0:
+            raise ConfigError("feedback.implicit_negative_weight must be between 0.0 and 1.0")
 
 
 @dataclass(frozen=True)
@@ -151,7 +220,9 @@ class MimirConfig:
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     temporal: TemporalConfig = field(default_factory=TemporalConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
+    feedback: FeedbackConfig = field(default_factory=FeedbackConfig)
     watcher: WatcherConfig = field(default_factory=WatcherConfig)
+    admin: AdminConfig = field(default_factory=AdminConfig)
 
     def __post_init__(self) -> None:
         if not self.repos:
@@ -194,6 +265,9 @@ class MimirConfig:
                     name=r["name"],
                     path=path.parent.joinpath(Path(r["path"]).expanduser()).resolve(),
                     language_hint=r.get("language_hint"),
+                    clone_url=r.get("clone_url"),
+                    branch=r.get("branch", "main"),
+                    webhook_repo=r.get("webhook_repo"),
                 )
                 for r in raw.get("repos", [])
             ]
@@ -217,6 +291,13 @@ class MimirConfig:
                     str(config_dir.joinpath(embeddings.cache_dir).resolve()),
                 )
 
+            admin = _parse_section(AdminConfig, raw.get("admin", {}))
+            if admin.mirrors_dir and not Path(admin.mirrors_dir).is_absolute():
+                object.__setattr__(
+                    admin, "mirrors_dir",
+                    str(config_dir.joinpath(admin.mirrors_dir).resolve()),
+                )
+
             return cls(
                 repos=repos,
                 data_dir=data_dir,
@@ -228,7 +309,9 @@ class MimirConfig:
                 retrieval=_parse_section(RetrievalConfig, raw.get("retrieval", {})),
                 temporal=_parse_section(TemporalConfig, raw.get("temporal", {})),
                 session=_parse_section(SessionConfig, raw.get("session", {})),
+                feedback=_parse_section(FeedbackConfig, raw.get("feedback", {})),
                 watcher=_parse_section(WatcherConfig, raw.get("watcher", {})),
+                admin=admin,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ConfigError(f"Invalid config: {exc}") from exc
