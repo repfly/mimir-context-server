@@ -25,6 +25,14 @@ class IndexMetadataStore(Protocol):
         """Return recently published index versions."""
         ...
 
+    def activate(self, version: str) -> Optional[IndexVersion]:
+        """Make an existing published index version active."""
+        ...
+
+    def delete(self, version: str) -> None:
+        """Delete a published index version metadata row."""
+        ...
+
     def close(self) -> None:
         """Release resources."""
         ...

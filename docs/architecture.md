@@ -9,9 +9,9 @@ Mimir follows a hexagonal (ports & adapters) architecture with constructor-based
 ```
 Adapters (CLI, MCP, HTTP, Web UI)
     ↓
-Container (DI wiring — container.py)
+RuntimeFactory (indexer/query runtime wiring)
     ↓
-Services (business logic: indexing, retrieval, temporal, quality, intent, session, impact, guardrail, watcher)
+Services (business logic: indexing, retrieval, temporal, quality, intent, session, impact, guardrail)
     ↓
 Domain (core models: CodeGraph, Node, Edge, Config, Session — all frozen dataclasses/enums)
     ↓
@@ -26,10 +26,11 @@ Infra (concrete implementations: tree-sitter, sentence-transformers/jina, SQLite
 ├── mimir/                      # Server package (mimir-context-server)
 │   ├── domain/                 # Core models, config, graph, catalog, guardrails, errors
 │   ├── ports/                  # Interface definitions (embedder, parser, stores)
-│   ├── services/               # Business logic (indexing, retrieval, catalog, impact, guardrail, temporal, session, quality, watcher)
+│   ├── services/               # Business logic (indexing, retrieval, catalog, impact, guardrail, temporal, session, quality)
 │   ├── infra/                  # Implementations (tree-sitter, embedders, SQLite, ChromaDB)
 │   ├── adapters/               # External interfaces (CLI, MCP, HTTP, web UI)
-│   └── container.py            # Dependency injection wiring
+│   ├── runtime.py              # IndexerRuntime and QueryRuntime composition
+│   └── container.py            # Legacy local composition path
 ├── backstage-plugin/           # Backstage catalog backend module
 │   └── plugins/catalog-backend-module-mimir/
 ├── client/                     # Client package (mimir-server-client)
@@ -47,20 +48,25 @@ Infra (concrete implementations: tree-sitter, sentence-transformers/jina, SQLite
 
 ## Data Storage
 
-Mimir stores all index data in a local directory (default `.mimir/`, configurable via `data_dir` in config). It is split into two subfolders so git can track one and ignore the other:
+Mimir stores all index data in a local directory (default `.mimir/`, configurable via `data_dir` in config). The indexer publishes immutable graph versions, and query surfaces consume only the active version.
 
 ```
 .mimir/
-├── project/                    # tracked in git — shared with CI & teammates
-│   └── graph.db                #   SQLite: nodes, edges, repo_state, embeddings
-└── session/                    # ignored by git — personal / re-derivable
+├── project/
+│   ├── graph.db                # working indexer graph for full/incremental builds
+│   ├── index_metadata.db       # active version pointer and compatibility metadata
+│   └── index_jobs.db           # durable indexer job queue
+├── indexes/
+│   └── <version>/graph.db      # published immutable graph snapshots
+└── session/
     ├── sessions.db             #   SQLite: session state for deduplication
+    ├── feedback.db             #   retrieval feedback signals
     ├── models/                 #   downloaded embedding weights
     ├── chroma/                 #   ChromaDB data (only if backend = "chroma")
     └── guardrail_audit.jsonl   #   Guardrail check audit log (if enabled)
 ```
 
-Committing `.mimir/project/graph.db` lets CI run `mimir guardrail check` without rebuilding the graph from scratch, which is the biggest cold-start cost in the pipeline.
+Run `mimir indexer run` or `mimir indexer worker` in the central indexing environment. Query surfaces (`mimir query serve`, MCP, HTTP, web inspector, guardrail checks) fail fast when no active index exists, rather than rebuilding implicitly.
 
 ## Supported Languages
 

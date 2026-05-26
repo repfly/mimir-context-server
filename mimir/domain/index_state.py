@@ -37,6 +37,7 @@ class IndexVersion:
     repo_commits: dict[str, str] = field(default_factory=dict)
     schema_version: int = 1
     embedding_model: Optional[str] = None
+    embedding_dim: Optional[int] = None
     config_hash: Optional[str] = None
     created_by: Optional[str] = None
     created_at: str = field(default_factory=utc_now_iso)

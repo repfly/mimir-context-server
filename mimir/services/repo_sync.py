@@ -5,37 +5,12 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
-import logging
 import os
-from dataclasses import dataclass, field
-from enum import Enum, unique
 from hashlib import sha256
 from pathlib import Path
 from typing import Optional
 
 from mimir.domain.config import MimirConfig, RepoConfig
-
-logger = logging.getLogger(__name__)
-
-
-@unique
-class JobStatus(str, Enum):
-    """Lifecycle state of a repo sync job."""
-
-    QUEUED = "queued"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-
-@dataclass
-class SyncJob:
-    id: str
-    repo: str
-    commit_sha: Optional[str] = None
-    status: JobStatus = JobStatus.QUEUED
-    error: Optional[str] = None
-    result: dict = field(default_factory=dict)
 
 
 class RepoSyncService:
@@ -139,107 +114,6 @@ class RepoSyncService:
         checkout_repo.remote().fetch(prune=True)
         checkout_repo.git.checkout("-B", repo.branch, f"origin/{repo.branch}")
         checkout_repo.git.reset("--hard", target_ref)
-
-
-class RepoSyncQueue:
-    """In-process async queue for webhook-driven repo sync jobs."""
-
-    def __init__(self, sync_service: RepoSyncService, runner, *, history_limit: int = 200) -> None:
-        self._sync_service = sync_service
-        self._runner = runner
-        self._history_limit = history_limit
-        self._jobs: dict[str, SyncJob] = {}
-        self._latest_job_by_repo: dict[str, str] = {}
-        self._queue: asyncio.Queue[str] = asyncio.Queue()
-        self._worker_task: Optional[asyncio.Task] = None
-        self._id = 0
-
-    def start(self) -> None:
-        if self._worker_task is None:
-            self._worker_task = asyncio.create_task(self._worker())
-
-    async def stop(self) -> None:
-        if self._worker_task is not None:
-            self._worker_task.cancel()
-            try:
-                await self._worker_task
-            except asyncio.CancelledError:
-                pass
-            self._worker_task = None
-
-    def enqueue(self, repo: str, *, commit_sha: Optional[str] = None) -> SyncJob:
-        if repo not in self._sync_service._repos_by_name:
-            raise ValueError(f"Unknown repo: {repo}")
-        existing_id = self._latest_job_by_repo.get(repo)
-        if existing_id:
-            existing = self._jobs[existing_id]
-            if existing.status is JobStatus.QUEUED:
-                existing.commit_sha = commit_sha or existing.commit_sha
-                return existing
-
-        self._id += 1
-        job = SyncJob(id=f"job-{self._id}", repo=repo, commit_sha=commit_sha)
-        self._jobs[job.id] = job
-        self._latest_job_by_repo[repo] = job.id
-        self._queue.put_nowait(job.id)
-        self._prune_jobs()
-        return job
-
-    def get(self, job_id: str) -> Optional[SyncJob]:
-        return self._jobs.get(job_id)
-
-    def list_repo_states(self) -> list[dict]:
-        states = []
-        for repo in self._sync_service._config.repos:
-            states.append({
-                "repo": repo.name,
-                "path": str(repo.path),
-                "branch": repo.branch,
-                "clone_url": repo.clone_url,
-                "webhook_repo": repo.webhook_repo or repo.name,
-                "current_commit": self._sync_service.current_commit(repo.name),
-                "latest_job_id": self._latest_job_by_repo.get(repo.name),
-            })
-        return states
-
-    async def _worker(self) -> None:
-        while True:
-            job_id = await self._queue.get()
-            job = self._jobs[job_id]
-            if job.status is not JobStatus.QUEUED:
-                self._queue.task_done()
-                continue
-
-            job.status = JobStatus.RUNNING
-            try:
-                sync_result = await self._sync_service.sync_repo(job.repo, commit_sha=job.commit_sha)
-                index_result = await self._runner(job.repo)
-                job.result = {"sync": sync_result, "index": index_result}
-                job.status = JobStatus.COMPLETED
-            except Exception as exc:
-                logger.exception("Repo sync job failed for %s", job.repo)
-                job.status = JobStatus.FAILED
-                job.error = str(exc)
-            finally:
-                self._prune_jobs()
-                self._queue.task_done()
-
-    def _prune_jobs(self) -> None:
-        """Bound terminal job retention while preserving active/latest jobs."""
-        protected_ids = {
-            job_id
-            for job_id in self._latest_job_by_repo.values()
-            if job_id in self._jobs
-        }
-        removable = [
-            job
-            for job in self._jobs.values()
-            if job.status in {JobStatus.COMPLETED, JobStatus.FAILED} and job.id not in protected_ids
-        ]
-        removable.sort(key=lambda job: int(job.id.removeprefix("job-")))
-        overflow = max(0, len(removable) - self._history_limit)
-        for job in removable[:overflow]:
-            self._jobs.pop(job.id, None)
 
 
 def parse_webhook_payload(body: bytes) -> dict:
