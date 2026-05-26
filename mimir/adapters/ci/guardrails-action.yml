@@ -18,7 +18,7 @@ jobs:
         run: pip install mimir-context-server
 
       - name: Build index (incremental)
-        run: mimir index
+        run: mimir indexer run
 
       - name: Run guardrails
         run: |

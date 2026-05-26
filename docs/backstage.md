@@ -17,7 +17,7 @@ Mimir includes a Backstage catalog backend module that auto-populates your servi
 
 ## Setup
 
-1. Start the Mimir HTTP server: `mimir serve --http`
+1. Build an index with `mimir indexer run`, then start the query HTTP server with `mimir query serve --http`.
 2. Install the plugin in your Backstage backend:
    ```bash
    yarn --cwd packages/backend add @mimir/plugin-catalog-backend-module-mimir

@@ -40,6 +40,15 @@ class RetrievalError(MimirError):
     """Failure during context assembly / search."""
 
 
+class NoActiveIndexError(RetrievalError):
+    """No published index version is active for query-serving operations."""
+
+    hint = "Run `mimir indexer run` first."
+
+    def __init__(self) -> None:
+        super().__init__("No active index")
+
+
 class SessionError(MimirError):
     """Failure in session management."""
 

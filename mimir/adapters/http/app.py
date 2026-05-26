@@ -6,11 +6,9 @@ import logging
 
 from aiohttp import web
 
-from mimir.container import Container
 from mimir.domain.config import MimirConfig
-from mimir.services.repo_sync import RepoSyncQueue
+from mimir.runtime import RuntimeFactory
 
-from .routes_admin import register_admin_routes
 from .routes_api import register_api_routes
 from .routes_mcp import register_mcp_routes
 from .state import HttpServerState
@@ -24,19 +22,10 @@ def run_http_server(
     port: int = 8421,
     workspace_name: str | None = None,
 ) -> None:
-    container = Container(config)
+    runtime = RuntimeFactory(config).query()
     state = HttpServerState(
-        container=container,
+        runtime=runtime,
         workspace_name=workspace_name or "default",
-        graph=container.load_graph(),
-    )
-    sync_queue = (
-        RepoSyncQueue(
-            container.repo_sync,
-            state.refresh_repo,
-            history_limit=config.admin.job_history_limit,
-        )
-        if config.admin.enable_repo_sync else None
     )
 
     logger.info(
@@ -44,42 +33,38 @@ def run_http_server(
         state.workspace_name,
         host,
         port,
-        state.graph.node_count,
+        state.current_graph().node_count,
     )
 
-    app = _build_app(state, sync_queue)
-    container.warmup()
+    app = _build_app(state)
 
-    logger.info("Shared Mimir HTTP server listening on http://%s:%d", host, port)
+    logger.info("Mimir query HTTP server listening on http://%s:%d", host, port)
     web.run_app(app, host=host, port=port, print=lambda _: None, access_log=None)
 
 
-def _build_app(state: HttpServerState, sync_queue: RepoSyncQueue | None) -> web.Application:
+def _build_app(state: HttpServerState) -> web.Application:
     routes = web.RouteTableDef()
     register_api_routes(routes, state)
-    register_admin_routes(routes, state, sync_queue)
     register_mcp_routes(routes, state)
 
     app = web.Application(middlewares=[_cors_middleware])
     app.router.add_routes(routes)
-    app.on_cleanup.append(_cleanup_factory(state, sync_queue))
-    if sync_queue is not None:
-        app.on_startup.append(_startup_factory(sync_queue))
+    app.on_startup.append(_startup_factory(state))
+    app.on_cleanup.append(_cleanup_factory(state))
     return app
 
 
-def _startup_factory(sync_queue: RepoSyncQueue):
+def _startup_factory(state: HttpServerState):
     async def on_startup(app: web.Application) -> None:
-        sync_queue.start()
+        state.runtime.start_polling()
 
     return on_startup
 
 
-def _cleanup_factory(state: HttpServerState, sync_queue: RepoSyncQueue | None):
+def _cleanup_factory(state: HttpServerState):
     async def on_cleanup(app: web.Application) -> None:
-        if sync_queue is not None:
-            await sync_queue.stop()
-        state.container.close()
+        await state.runtime.stop_polling()
+        state.runtime.close()
 
     return on_cleanup
 

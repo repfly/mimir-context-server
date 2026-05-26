@@ -6,7 +6,9 @@ from pathlib import Path
 
 from aiohttp import web
 
+from mimir.adapters.http.routes_api import no_active_index_response
 from mimir.adapters.web.state import WebServerState
+from mimir.domain.errors import NoActiveIndexError
 
 _STATIC_DIR = Path(__file__).parent / "static"
 
@@ -14,11 +16,21 @@ _STATIC_DIR = Path(__file__).parent / "static"
 def register_routes(routes: web.RouteTableDef, state: WebServerState) -> None:
     @routes.get("/api/stats")
     async def api_stats(request: web.Request) -> web.Response:
-        return web.json_response(state.current_graph().stats())
+        try:
+            return web.json_response(state.runtime.require_graph().stats())
+        except NoActiveIndexError:
+            return no_active_index_response()
+
+    @routes.get("/api/index/status")
+    async def api_index_status(request: web.Request) -> web.Response:
+        return web.json_response(state.runtime.status())
 
     @routes.get("/api/nodes")
     async def api_nodes(request: web.Request) -> web.Response:
-        graph = state.current_graph()
+        try:
+            graph = state.runtime.require_graph()
+        except NoActiveIndexError:
+            return no_active_index_response()
         kind = request.query.get("kind")
         repo = request.query.get("repo")
         limit = int(request.query.get("limit", "100"))
@@ -44,15 +56,26 @@ def register_routes(routes: web.RouteTableDef, state: WebServerState) -> None:
         node_id = request.query.get("id", "")
         if not node_id:
             return web.json_response({"error": "Missing 'id' parameter"}, status=400)
-        return _node_detail_response(state.current_graph(), node_id, include_embedding=True)
+        try:
+            graph = state.runtime.require_graph()
+        except NoActiveIndexError:
+            return no_active_index_response()
+        return _node_detail_response(graph, node_id, include_embedding=True)
 
     @routes.get("/api/nodes/{node_id:.*}")
     async def api_node_detail(request: web.Request) -> web.Response:
-        return _node_detail_response(state.current_graph(), request.match_info["node_id"])
+        try:
+            graph = state.runtime.require_graph()
+        except NoActiveIndexError:
+            return no_active_index_response()
+        return _node_detail_response(graph, request.match_info["node_id"])
 
     @routes.get("/api/graph-data")
     async def api_graph_data(request: web.Request) -> web.Response:
-        graph = state.current_graph()
+        try:
+            graph = state.runtime.require_graph()
+        except NoActiveIndexError:
+            return no_active_index_response()
         repo = request.query.get("repo")
         max_nodes = int(request.query.get("max", "200"))
 
@@ -78,11 +101,14 @@ def register_routes(routes: web.RouteTableDef, state: WebServerState) -> None:
         if not query:
             return web.json_response({"error": "Missing query parameter 'q'"}, status=400)
 
-        graph = state.current_graph()
+        try:
+            graph = state.runtime.require_graph()
+        except NoActiveIndexError:
+            return no_active_index_response()
         budget = int(request.query.get("budget", "4000"))
         repo_filter = request.query.get("repo")
         repos = [repo_filter] if repo_filter else None
-        bundle = await state.container.retrieval.search(
+        bundle = await state.runtime.retrieval.search(
             query=query,
             graph=graph,
             token_budget=budget,
@@ -98,37 +124,28 @@ def register_routes(routes: web.RouteTableDef, state: WebServerState) -> None:
 
     @routes.get("/api/hotspots")
     async def api_hotspots(request: web.Request) -> web.Response:
-        graph = state.current_graph()
+        try:
+            graph = state.runtime.require_graph()
+        except NoActiveIndexError:
+            return no_active_index_response()
         top_n = int(request.query.get("top", "20"))
-        results = state.container.temporal.get_hotspots(graph, top_n=top_n)
+        results = state.runtime.temporal.get_hotspots(graph, top_n=top_n)
         return web.json_response([{"node": node.to_dict(), "score": round(score, 4)} for node, score in results])
 
     @routes.get("/api/quality")
     async def api_quality(request: web.Request) -> web.Response:
-        graph = state.current_graph()
+        try:
+            graph = state.runtime.require_graph()
+        except NoActiveIndexError:
+            return no_active_index_response()
         repos_param = request.query.get("repos")
-        overview = state.container.quality.detect_gaps(
+        overview = state.runtime.quality.detect_gaps(
             graph,
             repos=repos_param.split(",") if repos_param else None,
             threshold=float(request.query.get("threshold", "0.3")),
             top_n=int(request.query.get("top_n", "50")),
         )
         return web.json_response(overview.to_dict())
-
-    @routes.delete("/api/clear")
-    async def api_clear(request: web.Request) -> web.Response:
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-
-        result = state.container.clear_data(
-            graph=body.get("graph", True),
-            sessions=body.get("sessions", True),
-        )
-        if body.get("graph", True):
-            state.reload_graph()
-        return web.json_response(result)
 
     @routes.get("/")
     async def index(request: web.Request) -> web.FileResponse:

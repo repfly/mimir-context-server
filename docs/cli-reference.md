@@ -6,16 +6,15 @@
 
 ```
 mimir init                  Create a mimir.toml config file
-mimir index                 Index all configured repositories
-mimir search "query"        Search and assemble context
-mimir ask "query"           Interactive search (retrieves context, calls LLM)
-mimir serve                 Start the MCP server
-mimir ui                    Launch the web inspector (localhost:8420)
-mimir hotspots              Show recently/frequently changed code
-mimir quality               Analyze graph quality and detect gaps
-mimir graph                 Explore the code graph
-mimir clear                 Delete locally stored index data
-mimir vacuum                Compact the SQLite database
+mimir indexer run           Build and publish an index version
+mimir indexer sync <repo>   Mirror one repo and publish a refreshed version
+mimir indexer enqueue KIND  Queue a durable index job: full, incremental, sync
+mimir indexer worker        Process durable index jobs
+mimir query search "query"  Search the active published index
+mimir query status          Show active index version and graph counts
+mimir query serve --http    Start the query-only HTTP server
+mimir query serve --remote  Proxy local MCP stdio to a remote query server
+mimir query ui              Launch the read-only web inspector
 mimir guardrail check       Validate a diff against architectural rules
 mimir guardrail init        Generate example rules + agent policy files
 mimir guardrail test        Dry-run: validate rule syntax against current graph
@@ -24,17 +23,16 @@ mimir guardrail approve <rule-ids...> --reason "..."
                             trailer on HEAD to clear matching BLOCK violations
 mimir workspace             Manage named workspaces
 
-Index flags:
+Indexer flags:
   --clean                   Force a full re-index (wipes existing data)
   --mode MODE               Summary mode: none, heuristic
+  --commit-sha SHA          Specific commit for repo sync
 
-Serve modes:
-  (default)                 stdio MCP server (local IDE integration)
+Query serve modes:
   --http                    Shared HTTP server (team access)
   --http-port PORT          HTTP port (default: 8421)
   --http-host HOST          HTTP bind address (default: 0.0.0.0)
   --remote / -r URL         Proxy to a remote Mimir HTTP server
-  --watch                   Enable live file watching (re-indexes on save)
 
 Global flags:
   --workspace / -w NAME     Use a named workspace from the registry

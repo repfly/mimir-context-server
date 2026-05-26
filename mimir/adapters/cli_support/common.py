@@ -60,13 +60,6 @@ def load_config(
         raise typer.Exit(1) from exc
 
 
-def enable_watcher(watcher_config):
-    """Return a copy of WatcherConfig with enabled=True."""
-    from dataclasses import replace
-
-    return replace(watcher_config, enabled=True)
-
-
 def setup_logging(verbose: bool) -> None:
     """Configure Rich logging for standard CLI commands."""
     from rich.logging import RichHandler

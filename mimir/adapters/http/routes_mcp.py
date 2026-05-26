@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 
 from aiohttp import web
 
 from mimir.adapters.http.state import HttpServerState
 from mimir.adapters.http.tooling import rpc_error, rpc_ok, tool_definitions
 from mimir.adapters.shared.session_context import apply_session_context
+from mimir.domain.errors import NoActiveIndexError
+from mimir.domain.guardrails_config import load_agent_policy, load_rules
+from mimir.services.agent_policy import AgentPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -59,16 +63,22 @@ async def _handle_tool_call(
     tool_name: str | None,
     tool_args: dict,
 ) -> web.Response:
-    graph = state.current_graph()
+    try:
+        graph = state.runtime.require_graph()
+    except NoActiveIndexError:
+        return web.json_response(
+            rpc_error(request_id, -32000, "No active index. Run: mimir indexer run"),
+            status=503,
+        )
     if tool_name == "get_context":
-        bundle = await state.container.retrieval.search(
+        bundle = await state.runtime.retrieval.search(
             query=tool_args["query"],
             graph=graph,
             token_budget=tool_args.get("budget"),
             repos=tool_args.get("repos"),
         )
         apply_session_context(
-            state.container,
+            state.runtime,
             bundle,
             query=tool_args["query"],
             session_id=tool_args.get("session_id"),
@@ -82,12 +92,27 @@ async def _handle_tool_call(
         return web.json_response(rpc_ok(request_id, {"content": [{"type": "text", "text": json.dumps(stats, indent=2)}]}))
 
     if tool_name == "get_hotspots":
-        results = state.container.temporal.get_hotspots(graph, top_n=tool_args.get("top_n", 20))
+        results = state.runtime.temporal.get_hotspots(graph, top_n=tool_args.get("top_n", 20))
         hotspots = [{"node": node.id, "score": f"{score:.3f}", "changes": node.modification_count} for node, score in results]
         return web.json_response(rpc_ok(request_id, {"content": [{"type": "text", "text": json.dumps(hotspots, indent=2)}]}))
 
+    if tool_name == "get_write_context":
+        write_context = state.runtime.write_context.assemble(file_path=tool_args["file_path"], graph=graph)
+        return web.json_response(rpc_ok(request_id, {"content": [{"type": "text", "text": write_context.format_for_llm()}]}))
+
+    if tool_name == "get_impact":
+        result = state.runtime.impact.analyze(
+            graph,
+            node_id=tool_args.get("node_id"),
+            file_path=tool_args.get("file_path"),
+            symbol_name=tool_args.get("symbol_name"),
+            max_hops=tool_args.get("max_hops", 3),
+        )
+        text = "No matching symbol or file found for impact analysis." if result is None else result.format_for_llm()
+        return web.json_response(rpc_ok(request_id, {"content": [{"type": "text", "text": text}]}))
+
     if tool_name == "get_quality":
-        overview = state.container.quality.detect_gaps(
+        overview = state.runtime.quality.detect_gaps(
             graph,
             repos=tool_args.get("repos"),
             threshold=tool_args.get("threshold"),
@@ -96,15 +121,39 @@ async def _handle_tool_call(
         return web.json_response(rpc_ok(request_id, {"content": [{"type": "text", "text": overview.format_for_llm()}]}))
 
     if tool_name == "get_catalog":
-        response = state.container.catalog.generate_catalog(graph, repos=tool_args.get("repos"))
+        response = state.runtime.catalog.generate_catalog(graph, repos=tool_args.get("repos"))
         return web.json_response(rpc_ok(request_id, {"content": [{"type": "text", "text": response.format_for_llm()}]}))
 
     if tool_name == "get_catalog_drift":
-        report = state.container.catalog.detect_drift(
+        report = state.runtime.catalog.detect_drift(
             graph,
             repo=tool_args["repo"],
             declared_deps=tool_args.get("declared_dependencies", []),
         )
         return web.json_response(rpc_ok(request_id, {"content": [{"type": "text", "text": report.format_for_llm()}]}))
+
+    if tool_name == "validate_change":
+        rules = load_rules(Path(tool_args.get("rules_path", "mimir-rules.yaml")))
+        result = await state.runtime.guardrail.evaluate(graph, tool_args["diff"], rules)
+        return web.json_response(rpc_ok(request_id, {"content": [{"type": "text", "text": result.format_for_llm()}]}))
+
+    if tool_name == "can_i_modify":
+        policy_path = Path(tool_args.get("policy_path", "mimir-agent-policy.yaml"))
+        try:
+            raw_policies = load_agent_policy(policy_path)
+            policy = AgentPolicy.from_dict(raw_policies[0]) if raw_policies else None
+        except Exception:
+            policy = None
+        file_path = tool_args["file_path"]
+        if policy is None:
+            text = f"File: {file_path}\nNo agent policy found - allowed by default."
+        else:
+            allowed = state.runtime.agent_policy.check_file_access(policy, file_path)
+            text = (
+                f"File: {file_path}\n"
+                f"Policy: {policy.name}\n"
+                f"Allowed: {'yes' if allowed else 'NO - outside agent scope'}"
+            )
+        return web.json_response(rpc_ok(request_id, {"content": [{"type": "text", "text": text}]}))
 
     return web.json_response(rpc_error(request_id, -32601, f"Unknown tool: {tool_name}"))

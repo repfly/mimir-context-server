@@ -51,13 +51,13 @@ Co-retrieval learning tracks which nodes appear together and boosts similar node
 
 ## Incremental Indexing
 
-After the initial full index, `mimir index` runs incrementally:
+After the initial full index, `mimir indexer run` runs incrementally:
 
 ```bash
-mimir index                    # first time: full; subsequent: incremental
+mimir indexer run              # first time: full; subsequent: incremental
 git pull                       # pull changes
-mimir index                    # only re-indexes the diff
-mimir index --clean            # force full re-index (wipes existing data)
+mimir indexer run              # only re-indexes the diff
+mimir indexer run --clean      # force full re-index (wipes existing data)
 ```
 
 Mimir stores the last-indexed commit hash per repo. On each run:
@@ -70,31 +70,24 @@ Mimir stores the last-indexed commit hash per repo. On each run:
 
 Unchanged repos are skipped entirely.
 
-## Live File Watching
+## Fresh Indexes
 
-For an always-fresh graph during development, Mimir can watch your repos for file changes and re-index automatically:
+For an always-fresh graph during development or CI, run the indexer after changes or use the durable worker:
 
 ```bash
-mimir serve --watch            # start MCP server with live re-indexing
+mimir indexer worker
 ```
 
-Or enable it permanently in `mimir.toml`:
-
-```toml
-[watcher]
-enabled = true
-```
-
-The file watcher uses a debounced approach — rapid saves (e.g., auto-format on save) are batched into a single re-index operation. Every file save triggers:
+Each index refresh:
 
 1. Tree-sitter re-parse of the changed file
 2. Stale node removal + new node creation
 3. Affected-set cross-file resolution (only the changed symbols, not the full graph)
 4. Heuristic summary generation
 5. Embedding + vector store update
-6. BM25 index invalidation
+6. Published index activation
 
-The graph, vector store, and search index stay in sync with your code as you edit.
+Query runtimes poll for the active published version and swap to it without running indexing work.
 
 ## Quality Scoring & Gap Detection
 
@@ -127,4 +120,4 @@ Typical gap reasons include:
 
 Gap detection is useful after indexing to verify coverage, or periodically to catch regressions as the codebase evolves.
 
-See also: [Configuration](configuration.md) for tuning parameters, [CLI Reference](cli-reference.md) for `mimir quality` and `mimir index`.
+See also: [Configuration](configuration.md) for tuning parameters and [CLI Reference](cli-reference.md) for `mimir query` and `mimir indexer`.
