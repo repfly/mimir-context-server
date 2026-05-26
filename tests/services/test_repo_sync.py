@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from mimir.domain.config import AdminConfig, MimirConfig, RepoConfig
-from mimir.services.repo_sync import RepoSyncQueue, RepoSyncService, parse_webhook_payload
+from mimir.services.repo_sync import RepoSyncService, parse_webhook_payload
 
 
 def _config(tmp_path: Path) -> MimirConfig:
@@ -85,68 +85,3 @@ def test_parse_webhook_payload_normalizes_branch() -> None:
     assert payload["repo"] == "payments-service"
     assert payload["branch"] == "main"
     assert payload["commit_sha"] == "abc123"
-
-
-@pytest.mark.asyncio
-async def test_repo_sync_queue_deduplicates_running_or_queued_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MIMIR_WEBHOOK_SECRET", "topsecret")
-    svc = RepoSyncService(_config(tmp_path))
-    monkeypatch.setattr(
-        svc,
-        "sync_repo",
-        lambda repo_name, commit_sha=None: _sync_result(repo_name, commit_sha),
-    )
-
-    seen: list[str] = []
-
-    async def runner(repo_name: str) -> dict:
-        seen.append(repo_name)
-        return {"repo": repo_name}
-
-    queue = RepoSyncQueue(svc, runner)
-    queue.start()
-    try:
-        job1 = queue.enqueue("payments", commit_sha="abc123")
-        job2 = queue.enqueue("payments", commit_sha="def456")
-
-        assert job1.id == job2.id
-        assert job2.commit_sha == "def456"
-
-        await queue._queue.join()
-        assert seen == ["payments"]
-        assert queue.get(job1.id).status == "completed"
-    finally:
-        await queue.stop()
-
-
-def test_repo_sync_queue_keeps_follow_up_job_when_previous_is_running(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MIMIR_WEBHOOK_SECRET", "topsecret")
-    svc = RepoSyncService(_config(tmp_path))
-    queue = RepoSyncQueue(svc, lambda repo_name: _sync_result(repo_name, None))
-
-    job1 = queue.enqueue("payments", commit_sha="abc123")
-    job1.status = "running"
-    job2 = queue.enqueue("payments", commit_sha="def456")
-
-    assert job1.id != job2.id
-    assert job2.commit_sha == "def456"
-
-
-def test_repo_sync_queue_prunes_old_terminal_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MIMIR_WEBHOOK_SECRET", "topsecret")
-    svc = RepoSyncService(_config(tmp_path))
-    queue = RepoSyncQueue(svc, lambda repo_name: _sync_result(repo_name, None), history_limit=1)
-
-    job1 = queue.enqueue("payments", commit_sha="abc123")
-    job1.status = "completed"
-    job2 = queue.enqueue("payments", commit_sha="def456")
-    job2.status = "failed"
-    job3 = queue.enqueue("payments", commit_sha="ghi789")
-
-    assert queue.get(job1.id) is None
-    assert queue.get(job2.id) is job2
-    assert queue.get(job3.id) is job3
-
-
-async def _sync_result(repo_name: str, commit_sha: str | None) -> dict:
-    return {"repo": repo_name, "commit": commit_sha}

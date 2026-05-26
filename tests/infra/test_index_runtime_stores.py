@@ -17,6 +17,7 @@ def test_index_metadata_store_publishes_active_version(tmp_path: Path) -> None:
             node_count=2,
             schema_version=3,
             embedding_model="local:test",
+            embedding_dim=3,
             config_hash="abc123",
             created_by="test",
         )
@@ -30,9 +31,29 @@ def test_index_metadata_store_publishes_active_version(tmp_path: Path) -> None:
         assert active.node_count == 2
         assert active.schema_version == 3
         assert active.embedding_model == "local:test"
+        assert active.embedding_dim == 3
         assert active.config_hash == "abc123"
         assert active.created_by == "test"
         assert store.get("v1").active is False
+    finally:
+        store.close()
+
+
+def test_index_metadata_store_activates_and_deletes_versions(tmp_path: Path) -> None:
+    store = SqliteIndexMetadataStore(tmp_path / "metadata.db")
+    try:
+        store.publish(IndexVersion(version="v1", graph_path="/tmp/v1/graph.db"), activate=True)
+        store.publish(IndexVersion(version="v2", graph_path="/tmp/v2/graph.db"), activate=True)
+
+        activated = store.activate("v1")
+
+        assert activated is not None
+        assert activated.active is True
+        assert store.get_active().version == "v1"
+        assert store.get("v2").active is False
+
+        store.delete("v2")
+        assert store.get("v2") is None
     finally:
         store.close()
 

@@ -7,10 +7,13 @@ from aiohttp.test_utils import make_mocked_request
 
 from mimir.adapters.http.app import _build_app
 from mimir.adapters.http.state import HttpServerState
+from mimir.adapters.web.routes import register_routes as register_web_routes
+from mimir.adapters.web.state import WebServerState
 from mimir.domain.config import EmbeddingConfig, MimirConfig, RepoConfig, VectorDbConfig
 from mimir.domain.errors import NoActiveIndexError
 from mimir.domain.graph import CodeGraph
 from mimir.domain.models import Node, NodeKind
+import mimir.runtime as runtime_module
 from mimir.runtime import IndexerRuntime, QueryRuntime
 
 
@@ -72,8 +75,8 @@ def test_query_runtime_status_without_active_index_and_require_graph_fails(tmp_p
 
 def test_publish_graph_then_query_runtime_loads_and_reloads_active_version(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = _config(tmp_path)
+    monkeypatch.setattr(runtime_module, "_build_embedder", lambda config: _FakeEmbedder())
     indexer = IndexerRuntime(cfg)
-    monkeypatch.setattr(QueryRuntime, "_build_embedder", lambda self: _FakeEmbedder())
     try:
         first = indexer.publish_graph(_graph("repo:service.py::handle"))
         query = QueryRuntime(cfg)
@@ -81,6 +84,7 @@ def test_publish_graph_then_query_runtime_loads_and_reloads_active_version(tmp_p
             assert query.active_version.version == first.version
             assert query.require_graph().has_node("repo:service.py::handle")
             assert query.status()["embedding_model"] == "local:test"
+            assert query.status()["embedding_dim"] == 3
 
             second = indexer.publish_graph(_graph("repo:service.py::handle_v2", raw_code="def handle_v2():\n    return 2\n"))
             assert second.version != first.version
@@ -94,10 +98,10 @@ def test_publish_graph_then_query_runtime_loads_and_reloads_active_version(tmp_p
 @pytest.mark.asyncio
 async def test_query_runtime_reload_if_changed_swaps_graph(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = _config(tmp_path)
+    monkeypatch.setattr(runtime_module, "_build_embedder", lambda config: _FakeEmbedder())
     indexer = IndexerRuntime(cfg)
-    monkeypatch.setattr(QueryRuntime, "_build_embedder", lambda self: _FakeEmbedder())
     try:
-        first = indexer.publish_graph(_graph("repo:service.py::handle"))
+        indexer.publish_graph(_graph("repo:service.py::handle"))
         query = QueryRuntime(cfg)
         try:
             second = indexer.publish_graph(_graph("repo:service.py::handle_v2", raw_code="def handle_v2():\n    return 2\n"))
@@ -113,7 +117,7 @@ async def test_query_runtime_reload_if_changed_swaps_graph(tmp_path, monkeypatch
 
 @pytest.mark.asyncio
 async def test_http_status_without_active_index_and_context_503(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(QueryRuntime, "_build_embedder", lambda self: _FakeEmbedder())
+    monkeypatch.setattr(runtime_module, "_build_embedder", lambda config: _FakeEmbedder())
     runtime = QueryRuntime(_config(tmp_path))
     app = _build_app(HttpServerState(runtime=runtime, workspace_name="default"))
     try:
@@ -135,8 +139,8 @@ async def test_http_status_without_active_index_and_context_503(tmp_path, monkey
 @pytest.mark.asyncio
 async def test_http_index_status_reports_active_version(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = _config(tmp_path)
+    monkeypatch.setattr(runtime_module, "_build_embedder", lambda config: _FakeEmbedder())
     indexer = IndexerRuntime(cfg)
-    monkeypatch.setattr(QueryRuntime, "_build_embedder", lambda self: _FakeEmbedder())
     try:
         version = indexer.publish_graph(_graph("repo:service.py::handle"))
         runtime = QueryRuntime(cfg)
@@ -152,6 +156,78 @@ async def test_http_index_status_reports_active_version(tmp_path, monkeypatch: p
             await app.cleanup()
     finally:
         indexer.close()
+
+
+def test_indexer_lifecycle_can_activate_and_prune_versions(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _config(tmp_path)
+    monkeypatch.setattr(runtime_module, "_build_embedder", lambda config: _FakeEmbedder())
+    indexer = IndexerRuntime(cfg)
+    try:
+        first = indexer.publish_graph(_graph("repo:service.py::handle"))
+        second = indexer.publish_graph(_graph("repo:service.py::handle_v2"))
+        third = indexer.publish_graph(_graph("repo:service.py::handle_v3"))
+
+        activated = indexer.activate_version(first.version)
+        removed = indexer.prune_versions(keep=1)
+
+        assert activated.version == first.version
+        assert first.version not in removed
+        assert second.version in removed
+        assert third.version not in removed
+    finally:
+        indexer.close()
+
+
+def test_query_runtime_rejects_embedding_model_mismatch(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _config(tmp_path)
+    monkeypatch.setattr(runtime_module, "_build_embedder", lambda config: _FakeEmbedder())
+    indexer = IndexerRuntime(cfg)
+    try:
+        indexer.publish_graph(_graph("repo:service.py::handle"))
+    finally:
+        indexer.close()
+
+    mismatched = MimirConfig(
+        repos=cfg.repos,
+        data_dir=cfg.data_dir,
+        embeddings=EmbeddingConfig(model="local:other"),
+        vector_db=VectorDbConfig(backend="numpy"),
+    )
+    with pytest.raises(Exception, match="embedding model mismatch"):
+        QueryRuntime(mismatched)
+
+
+@pytest.mark.asyncio
+async def test_mcp_over_http_without_active_index_returns_503(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime_module, "_build_embedder", lambda config: _FakeEmbedder())
+    runtime = QueryRuntime(_config(tmp_path))
+    app = _build_app(HttpServerState(runtime=runtime, workspace_name="default"))
+    try:
+        response = await _request(app, "POST", "/api/v1/mcp", json_body={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "get_graph_stats", "arguments": {}},
+        })
+
+        assert response.status == 503
+        assert response.json["error"]["message"].startswith("No active index")
+    finally:
+        await app.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_web_inspector_without_active_index_returns_503(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime_module, "_build_embedder", lambda config: _FakeEmbedder())
+    runtime = QueryRuntime(_config(tmp_path))
+    app = _build_web_app(runtime)
+    try:
+        response = await _request(app, "GET", "/api/stats")
+
+        assert response.status == 503
+        assert response.json["error"] == "No active index"
+    finally:
+        await app.cleanup()
 
 
 class _Response:
@@ -181,3 +257,13 @@ async def _request(app, method: str, path: str, *, json_body: dict | None = None
     request._match_info = match
     response = await match.handler(request)
     return _Response(response)
+
+
+def _build_web_app(runtime: QueryRuntime):
+    from aiohttp import web
+
+    routes = web.RouteTableDef()
+    register_web_routes(routes, WebServerState(runtime=runtime))
+    app = web.Application()
+    app.router.add_routes(routes)
+    return app

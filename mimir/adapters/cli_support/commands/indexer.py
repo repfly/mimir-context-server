@@ -69,6 +69,76 @@ def sync_repo(
         runtime.close()
 
 
+@indexer_app.command("versions")
+def versions(
+    limit: int = typer.Option(20, "--limit", help="Maximum versions to show"),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Named workspace from registry"),
+    config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c", help="Config file path"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """List published index versions."""
+    setup_logging(verbose)
+    cfg, _ = load_config(config, workspace)
+    runtime = RuntimeFactory(cfg).indexer()
+    try:
+        for version in runtime.list_versions(limit=limit):
+            marker = "*" if version.active else " "
+            console.print(
+                f"{marker} {version.version} "
+                f"nodes={version.node_count} edges={version.edge_count} "
+                f"model={version.embedding_model or '-'} dim={version.embedding_dim or '-'}"
+            )
+    finally:
+        runtime.close()
+
+
+@indexer_app.command("activate")
+def activate(
+    version: str = typer.Argument(..., help="Published index version to activate"),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Named workspace from registry"),
+    config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c", help="Config file path"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Activate a previously published index version."""
+    setup_logging(verbose)
+    cfg, _ = load_config(config, workspace)
+    runtime = RuntimeFactory(cfg).indexer()
+    try:
+        activated = runtime.activate_version(version)
+        console.print(f"[green]Activated index version:[/] {activated.version}")
+    except Exception as exc:
+        console.print(f"[red bold]Activate failed:[/] {exc}")
+        raise typer.Exit(1) from exc
+    finally:
+        runtime.close()
+
+
+@indexer_app.command("prune")
+def prune(
+    keep: int = typer.Option(5, "--keep", help="Newest versions to retain, active is always retained"),
+    workspace: Optional[str] = typer.Option(None, "--workspace", "-w", help="Named workspace from registry"),
+    config: Path = typer.Option(DEFAULT_CONFIG, "--config", "-c", help="Config file path"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Delete old inactive published index versions."""
+    setup_logging(verbose)
+    cfg, _ = load_config(config, workspace)
+    runtime = RuntimeFactory(cfg).indexer()
+    try:
+        removed = runtime.prune_versions(keep=keep)
+        if removed:
+            console.print(f"[green]Pruned {len(removed)} index version(s)[/]")
+            for version in removed:
+                console.print(f"  {version}")
+        else:
+            console.print("[yellow]No index versions pruned[/]")
+    except Exception as exc:
+        console.print(f"[red bold]Prune failed:[/] {exc}")
+        raise typer.Exit(1) from exc
+    finally:
+        runtime.close()
+
+
 @indexer_app.command("enqueue")
 def enqueue(
     kind: IndexJobKind = typer.Argument(..., help="Job kind"),

@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS index_versions (
     schema_version INTEGER NOT NULL DEFAULT 1,
     embedding_model TEXT,
     config_hash TEXT,
+    embedding_dim INTEGER,
     created_by TEXT,
     created_at   TEXT NOT NULL,
     activated_at TEXT
@@ -50,6 +51,7 @@ class SqliteIndexMetadataStore:
         for col, defn in [
             ("schema_version", "INTEGER NOT NULL DEFAULT 1"),
             ("embedding_model", "TEXT"),
+            ("embedding_dim", "INTEGER"),
             ("config_hash", "TEXT"),
             ("created_by", "TEXT"),
         ]:
@@ -67,8 +69,9 @@ class SqliteIndexMetadataStore:
             cur.execute(
                 "INSERT OR REPLACE INTO index_versions "
                 "(version, graph_path, active, node_count, edge_count, repo_commits, "
-                "schema_version, embedding_model, config_hash, created_by, created_at, activated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "schema_version, embedding_model, embedding_dim, config_hash, created_by, "
+                "created_at, activated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     version.version,
                     version.graph_path,
@@ -78,6 +81,7 @@ class SqliteIndexMetadataStore:
                     json.dumps(version.repo_commits),
                     version.schema_version,
                     version.embedding_model,
+                    version.embedding_dim,
                     version.config_hash,
                     version.created_by,
                     version.created_at,
@@ -93,7 +97,8 @@ class SqliteIndexMetadataStore:
         try:
             cur = self._conn.execute(
                 "SELECT version, graph_path, active, node_count, edge_count, repo_commits, "
-                "schema_version, embedding_model, config_hash, created_by, created_at, activated_at "
+                "schema_version, embedding_model, embedding_dim, config_hash, created_by, "
+                "created_at, activated_at "
                 "FROM index_versions WHERE active = 1 ORDER BY activated_at DESC LIMIT 1"
             )
             row = cur.fetchone()
@@ -105,7 +110,8 @@ class SqliteIndexMetadataStore:
         try:
             cur = self._conn.execute(
                 "SELECT version, graph_path, active, node_count, edge_count, repo_commits, "
-                "schema_version, embedding_model, config_hash, created_by, created_at, activated_at "
+                "schema_version, embedding_model, embedding_dim, config_hash, created_by, "
+                "created_at, activated_at "
                 "FROM index_versions WHERE version = ?",
                 (version,),
             )
@@ -118,13 +124,40 @@ class SqliteIndexMetadataStore:
         try:
             cur = self._conn.execute(
                 "SELECT version, graph_path, active, node_count, edge_count, repo_commits, "
-                "schema_version, embedding_model, config_hash, created_by, created_at, activated_at "
+                "schema_version, embedding_model, embedding_dim, config_hash, created_by, "
+                "created_at, activated_at "
                 "FROM index_versions ORDER BY created_at DESC LIMIT ?",
                 (limit,),
             )
             return [self._row_to_version(row) for row in cur.fetchall()]
         except sqlite3.Error as exc:
             raise StorageError(f"Failed to list index versions: {exc}") from exc
+
+    def activate(self, version: str) -> Optional[IndexVersion]:
+        try:
+            existing = self.get(version)
+            if existing is None:
+                return None
+            activated_at = utc_now_iso()
+            cur = self._conn.cursor()
+            cur.execute("UPDATE index_versions SET active = 0")
+            cur.execute(
+                "UPDATE index_versions SET active = 1, activated_at = ? WHERE version = ?",
+                (activated_at, version),
+            )
+            self._conn.commit()
+            return self.get(version)
+        except sqlite3.Error as exc:
+            self._conn.rollback()
+            raise StorageError(f"Failed to activate index version: {exc}") from exc
+
+    def delete(self, version: str) -> None:
+        try:
+            self._conn.execute("DELETE FROM index_versions WHERE version = ?", (version,))
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            self._conn.rollback()
+            raise StorageError(f"Failed to delete index version: {exc}") from exc
 
     @staticmethod
     def _row_to_version(row) -> IndexVersion:
@@ -137,10 +170,11 @@ class SqliteIndexMetadataStore:
             repo_commits=json.loads(row[5] or "{}"),
             schema_version=row[6],
             embedding_model=row[7],
-            config_hash=row[8],
-            created_by=row[9],
-            created_at=row[10],
-            activated_at=row[11],
+            embedding_dim=row[8],
+            config_hash=row[9],
+            created_by=row[10],
+            created_at=row[11],
+            activated_at=row[12],
         )
 
     def close(self) -> None:

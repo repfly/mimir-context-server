@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import shutil
 from dataclasses import dataclass
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from mimir.domain.config import MimirConfig, SummaryMode
+from mimir.domain.config import MimirConfig, SummaryMode, VectorBackend
 from mimir.domain.errors import NoActiveIndexError, StorageError
 from mimir.domain.graph import CodeGraph
 from mimir.domain.index_state import IndexJob, IndexJobKind, IndexVersion
@@ -26,6 +27,7 @@ from mimir.services.feedback import FeedbackService
 from mimir.services.agent_policy import AgentPolicyService
 from mimir.services.guardrail import DiffAnalyzer, GuardrailService
 from mimir.services.impact import ImpactService
+from mimir.services.indexing import IndexingService
 from mimir.services.quality import QualityService
 from mimir.services.repo_sync import RepoSyncService
 from mimir.services.retrieval import RetrievalService
@@ -62,6 +64,51 @@ def _config_hash(config: MimirConfig) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _build_embedder(config: MimirConfig):
+    from mimir.infra.embedders.local import LocalEmbedder
+    from mimir.infra.embedders.jina import JinaEmbedder
+
+    model = config.embeddings.model
+    if model.startswith("api:"):
+        return JinaEmbedder(
+            model=model.removeprefix("api:"),
+            api_key_env=config.embeddings.api_key_env,
+            batch_size=config.embeddings.batch_size,
+        )
+    model_name = model.removeprefix("local:") if model.startswith("local:") else model
+    cache_dir = config.embeddings.cache_dir or str(config.session_dir / "models")
+    return LocalEmbedder(model_name=model_name, cache_dir=cache_dir)
+
+
+def _build_vector_store(config: MimirConfig):
+    if config.vector_db.backend is VectorBackend.CHROMA:
+        from mimir.infra.vector_stores.chroma import ChromaVectorStore
+
+        return ChromaVectorStore(
+            persist_directory=config.vector_db.persist_directory
+            or str(config.session_dir / "chroma"),
+        )
+    return NumpyVectorStore()
+
+
+def _embedding_dim(graph: CodeGraph) -> Optional[int]:
+    for node in graph.all_nodes():
+        if node.embedding:
+            return len(node.embedding)
+    return None
+
+
+def _validate_graph_embeddings(graph: CodeGraph, expected_dim: Optional[int]) -> None:
+    if expected_dim is None:
+        return
+    for node in graph.all_nodes():
+        if node.embedding and len(node.embedding) != expected_dim:
+            raise StorageError(
+                f"Index embedding dimension mismatch for {node.id}: "
+                f"expected {expected_dim}, got {len(node.embedding)}"
+            )
+
+
 @dataclass
 class QueryView:
     version: IndexVersion
@@ -89,10 +136,19 @@ class IndexerRuntime:
         self.config = config
         self.metadata_store = SqliteIndexMetadataStore(config.project_dir / "index_metadata.db")
         self.job_store = SqliteIndexJobStore(config.project_dir / "index_jobs.db")
+        from mimir.infra.parsers.tree_sitter import TreeSitterParser
 
-        from mimir.container import Container
-
-        self.container = Container(config)
+        self.parser = TreeSitterParser()
+        self.embedder = _build_embedder(config)
+        self.vector_store = _build_vector_store(config)
+        self.graph_store = SqliteGraphStore(config.project_dir / "graph.db")
+        self.indexing = IndexingService(
+            config=config,
+            parser=self.parser,
+            embedder=self.embedder,
+            vector_store=self.vector_store,
+            graph_store=self.graph_store,
+        )
         self.repo_sync = RepoSyncService(config)
 
     async def run_index(
@@ -102,10 +158,11 @@ class IndexerRuntime:
         mode_override: Optional[SummaryMode | str] = None,
     ) -> IndexVersion:
         if clean:
-            self.container.clear_data(graph=True, sessions=False)
-            graph = await self.container.indexing.index_all(mode_override=mode_override)
+            self.graph_store.clear()
+            self.vector_store.reset()
+            graph = await self.indexing.index_all(mode_override=mode_override)
         else:
-            graph, _ = await self.container.indexing.index_incremental(mode_override=mode_override)
+            graph, _ = await self.indexing.index_incremental(mode_override=mode_override)
         return self.publish_graph(graph)
 
     async def sync_repo(
@@ -117,12 +174,12 @@ class IndexerRuntime:
     ) -> IndexVersion:
         await self.repo_sync.sync_repo(repo_name, commit_sha=commit_sha)
         graph = self._load_active_or_working_graph()
-        await self.container.indexing.refresh_repo(
+        self.graph_store.save(graph)
+        await self.indexing.refresh_repo(
             graph,
             repo_name,
             mode_override=mode_override,
         )
-        self.container.replace_graph(graph)
         return self.publish_graph(graph)
 
     def enqueue(self, kind: IndexJobKind, *, repo: str | None = None, commit_sha: str | None = None) -> IndexJob:
@@ -166,7 +223,7 @@ class IndexerRuntime:
         finally:
             store.close()
 
-        repo_commits = self.container.graph_store.get_all_repo_states()
+        repo_commits = self.graph_store.get_all_repo_states()
         index_version = IndexVersion(
             version=version,
             graph_path=str(graph_path),
@@ -174,11 +231,49 @@ class IndexerRuntime:
             edge_count=graph.edge_count,
             repo_commits=repo_commits,
             embedding_model=self.config.embeddings.model,
+            embedding_dim=_embedding_dim(graph),
             config_hash=_config_hash(self.config),
             created_by="mimir-indexer",
         )
         self.metadata_store.publish(index_version, activate=True)
         return self.metadata_store.get(version) or index_version
+
+    def list_versions(self, *, limit: int = 20) -> list[IndexVersion]:
+        return self.metadata_store.list_versions(limit=limit)
+
+    def activate_version(self, version: str) -> IndexVersion:
+        selected = self.metadata_store.get(version)
+        if selected is None:
+            raise ValueError(f"Unknown index version: {version}")
+        graph_path = Path(selected.graph_path)
+        if not graph_path.is_file():
+            raise StorageError(f"Index graph not found: {graph_path}")
+        activated = self.metadata_store.activate(version)
+        if activated is None:
+            raise ValueError(f"Unknown index version: {version}")
+        return activated
+
+    def prune_versions(self, *, keep: int = 5) -> list[str]:
+        if keep <= 0:
+            raise ValueError("keep must be positive")
+        versions = self.metadata_store.list_versions(limit=10_000)
+        active = self.metadata_store.get_active()
+        active_id = active.version if active else None
+        retained = {version.version for version in versions[:keep]}
+        if active_id:
+            retained.add(active_id)
+
+        removed: list[str] = []
+        for version in versions:
+            if version.version in retained:
+                continue
+            graph_path = Path(version.graph_path)
+            version_dir = graph_path.parent
+            if version_dir.is_dir() and version_dir.parent == _index_root(self.config):
+                shutil.rmtree(version_dir)
+            self.metadata_store.delete(version.version)
+            removed.append(version.version)
+        return removed
 
     def _load_active_or_working_graph(self) -> CodeGraph:
         active = self.metadata_store.get_active()
@@ -188,10 +283,10 @@ class IndexerRuntime:
                 return store.load()
             finally:
                 store.close()
-        return self.container.graph_store.load()
+        return self.graph_store.load()
 
     def close(self) -> None:
-        self.container.close()
+        self.graph_store.close()
         self.metadata_store.close()
         self.job_store.close()
 
@@ -259,24 +354,9 @@ class QueryRuntime:
             self._retrieval = self._build_retrieval(self._active_vector_store)
         return self._retrieval
 
-    def _build_embedder(self):
-        from mimir.infra.embedders.local import LocalEmbedder
-        from mimir.infra.embedders.jina import JinaEmbedder
-
-        model = self.config.embeddings.model
-        if model.startswith("api:"):
-            return JinaEmbedder(
-                model=model.removeprefix("api:"),
-                api_key_env=self.config.embeddings.api_key_env,
-                batch_size=self.config.embeddings.batch_size,
-            )
-        model_name = model.removeprefix("local:") if model.startswith("local:") else model
-        cache_dir = self.config.embeddings.cache_dir or str(self.config.session_dir / "models")
-        return LocalEmbedder(model_name=model_name, cache_dir=cache_dir)
-
     def _build_retrieval(self, vector_store: NumpyVectorStore) -> RetrievalService:
         if self._embedder is None:
-            self._embedder = self._build_embedder()
+            self._embedder = _build_embedder(self.config)
         return RetrievalService(
             config=self.config,
             embedder=self._embedder,
@@ -328,6 +408,7 @@ class QueryRuntime:
             "repo_commits": version.repo_commits if version else {},
             "schema_version": version.schema_version if version else None,
             "embedding_model": version.embedding_model if version else None,
+            "embedding_dim": version.embedding_dim if version else None,
             "config_hash": version.config_hash if version else None,
             "created_by": version.created_by if version else None,
             "activated_at": version.activated_at if version else None,
@@ -344,11 +425,17 @@ class QueryRuntime:
             raise StorageError(f"Active index graph not found: {graph_path}")
         if version.schema_version != 1:
             raise StorageError(f"Unsupported index schema version: {version.schema_version}")
+        if version.embedding_model and version.embedding_model != self.config.embeddings.model:
+            raise StorageError(
+                f"Active index embedding model mismatch: expected "
+                f"{self.config.embeddings.model}, got {version.embedding_model}"
+            )
         store = SqliteGraphStore(Path(version.graph_path))
         try:
             graph = store.load()
         finally:
             store.close()
+        _validate_graph_embeddings(graph, version.embedding_dim)
         vector_store = NumpyVectorStore()
         from mimir.services.hydration import hydrate_vector_store
 
