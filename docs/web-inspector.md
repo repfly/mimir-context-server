@@ -5,8 +5,8 @@
 Mimir includes a browser-based graph visualization UI:
 
 ```bash
-mimir ui                        # launches at http://localhost:8420
-mimir ui --port 9000            # custom port
+mimir query ui                  # launches at http://localhost:8420
+mimir query ui --port 9000      # custom port
 ```
 
 Explore nodes by kind and repo, inspect edges, view cross-repo links, and drill into individual symbols.
