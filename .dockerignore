@@ -1,0 +1,16 @@
+.git
+.venv
+venv
+.mimir
+**/__pycache__
+**/*.pyc
+**/*.egg-info
+dist
+build
+client
+backstage-plugin
+docs
+tests
+.github
+.claude
+.DS_Store

@@ -1,9 +1,8 @@
 """Vector store hydration — populates the vector store from graph node embeddings.
 
 Upserts only the delta: ids present in the graph but missing from the
-store.  Persistent backends (Chroma) that already hold the HNSW index
-on disk skip the work entirely on warm starts.  ``upsert`` is
-idempotent in every backend, so the delta optimization is purely a
+store, so repeated calls (e.g. after a reload) skip vectors already
+held.  ``upsert`` is idempotent, so the delta optimization is purely a
 speedup — correctness does not depend on it.
 """
 

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel>=0.46", "setuptools-scm>=8"]
+requires = ["setuptools>=84.0", "wheel>=0.48", "setuptools-scm>=10.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,13 +8,12 @@ dynamic = ["version"]
 description = "Mimir — Context Server: intelligent code context engine for LLMs working with large, multi-repo codebases"
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "MIT"}
+license = "MIT"
 keywords = ["mcp", "context", "code", "llm", "rag", "code-graph", "embeddings", "mimir"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -25,34 +24,26 @@ classifiers = [
 ]
 
 dependencies = [
-    "networkx>=3.5",
-    "gitpython>=3.1",
-    "typer>=0.15",
-    "tomli>=2.2",
-    "chromadb>=1.5",
-    "pydantic-settings>=2.0",
-    "sentence-transformers>=4.1",
-    "litellm>=1.68",
-    "mcp>=1.26",
-    "numpy>=2.2",
-    "tree-sitter>=0.25",
-    "tree-sitter-language-pack>=0.9",
-    "aiohttp>=3.11",
-    "tiktoken>=0.9",
-    "rank-bm25>=0.2",
-    "rich>=14.0",
-    "watchdog>=6.0",
-    "pyyaml>=6.0",
+    "networkx>=3.6.1",
+    "gitpython>=3.2.0",
+    "typer>=0.27.2",
+    "onnxruntime>=1.30.0",
+    "tokenizers>=0.23.2",
+    "huggingface-hub>=1.33.0",
+    "numpy>=2.4.6",
+    "tree-sitter-language-pack>=1.20.0",
+    "aiohttp>=3.14.3",
+    "rank-bm25>=0.2.2",
+    "rich>=15.0.0",
+    "watchdog>=6.0.0",
+    "pyyaml>=6.0.3",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=9.0",
-    "pytest-asyncio>=1.3",
-    "pytest-cov>=7.0",
-]
-lsp = [
-    "multilspy>=0.2",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
 ]
 
 [project.urls]

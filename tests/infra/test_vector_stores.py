@@ -1,19 +1,12 @@
-"""Parity tests for VectorStore implementations.
+"""Contract tests for the VectorStore implementation.
 
-Exercises NumpyVectorStore and ChromaVectorStore against the same fixtures to
-ensure they agree on upsert/search/delete/count/reset/get_existing_ids.
-Metadata is intentionally scalar-only — ChromaVectorStore silently drops
-non-scalar metadata values (see ``chroma.py``), which would masquerade as a
-parity failure otherwise.
+Exercises NumpyVectorStore's upsert/search/delete/count/reset/get_existing_ids.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
-from mimir.infra.vector_stores.chroma import ChromaVectorStore
 from mimir.infra.vector_stores.numpy_store import NumpyVectorStore
 from mimir.ports.vector_store import VectorStore
 
@@ -23,20 +16,9 @@ from mimir.ports.vector_store import VectorStore
 # ---------------------------------------------------------------------------
 
 
-def _numpy_store() -> VectorStore:
+@pytest.fixture
+def store() -> VectorStore:
     return NumpyVectorStore()
-
-
-def _chroma_store(tmp_path: Path) -> VectorStore:
-    # Use a unique sub-path so parallel test runs don't collide.
-    return ChromaVectorStore(persist_directory=str(tmp_path / "chroma"))
-
-
-@pytest.fixture(params=["numpy", "chroma"])
-def store(request, tmp_path: Path) -> VectorStore:
-    if request.param == "numpy":
-        return _numpy_store()
-    return _chroma_store(tmp_path)
 
 
 def _sample_vectors() -> tuple[list[str], list[list[float]], list[dict]]:
@@ -117,6 +99,45 @@ def test_upsert_updates_existing_id(store: VectorStore) -> None:
     assert store.count() == 1
 
 
+def test_upsert_duplicate_id_in_one_batch_last_write_wins(store: VectorStore) -> None:
+    store.upsert(
+        ids=["x", "y", "x"],
+        embeddings=[[1.0, 0.0], [0.0, 1.0], [0.0, 1.0]],
+        metadatas=[{"repo": "alpha"}, {"repo": "beta"}, {"repo": "gamma"}],
+    )
+
+    assert store.count() == 2
+    results = store.search(query_embedding=[1.0, 0.0], top_k=5, where={"repo": "gamma"})
+    assert [r.id for r in results] == ["x"]
+    assert store.search(query_embedding=[1.0, 0.0], top_k=5, where={"repo": "alpha"}) == []
+
+
+def test_upsert_mixed_update_and_append(store: VectorStore) -> None:
+    ids, embeddings, metadatas = _sample_vectors()
+    store.upsert(ids=ids, embeddings=embeddings, metadatas=metadatas)
+
+    store.upsert(
+        ids=["c", "d"],
+        embeddings=[[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 0.0]],
+        metadatas=[{"repo": "alpha"}, {"repo": "alpha"}],
+    )
+
+    assert store.count() == 4
+    assert store.search(query_embedding=[0.0, 0.0, 0.0, 1.0], top_k=1)[0].id == "c"
+    assert store.search(query_embedding=[0.0, 0.0, 1.0, 0.0], top_k=1)[0].id == "d"
+
+
+def test_filtered_search_after_delete(store: VectorStore) -> None:
+    ids, embeddings, metadatas = _sample_vectors()
+    store.upsert(ids=ids, embeddings=embeddings, metadatas=metadatas)
+    store.search(query_embedding=[1.0, 0.0, 0.0, 0.0], top_k=5, where={"repo": "alpha"})
+
+    store.delete(ids=["a"])
+
+    results = store.search(query_embedding=[1.0, 0.0, 0.0, 0.0], top_k=5, where={"repo": "alpha"})
+    assert [r.id for r in results] == ["c"]
+
+
 # ---------------------------------------------------------------------------
 # delete / count / reset
 # ---------------------------------------------------------------------------
@@ -168,6 +189,5 @@ def test_get_existing_ids_all_present(store: VectorStore) -> None:
 
 def test_get_existing_ids_empty_input(store: VectorStore) -> None:
     # Edge case: callers may pass an empty id list when the graph has no
-    # embedded nodes.  Both backends must handle this without hitting the
-    # underlying collection.
+    # embedded nodes.
     assert store.get_existing_ids([]) == set()
