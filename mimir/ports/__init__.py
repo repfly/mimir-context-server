@@ -8,7 +8,6 @@ from mimir.ports.parser import Parser, Symbol
 from mimir.ports.embedder import Embedder
 from mimir.ports.vector_store import VectorStore, VectorSearchResult
 from mimir.ports.graph_store import GraphStore
-from mimir.ports.llm_client import LlmClient
 from mimir.ports.session_store import SessionStore
 
 __all__ = [
@@ -18,6 +17,5 @@ __all__ = [
     "VectorStore",
     "VectorSearchResult",
     "GraphStore",
-    "LlmClient",
     "SessionStore",
 ]

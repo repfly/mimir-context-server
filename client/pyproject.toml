@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel>=0.46", "setuptools-scm>=8"]
+requires = ["setuptools>=84.0", "wheel>=0.48", "setuptools-scm>=10.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,13 +8,12 @@ dynamic = ["version"]
 description = "Lightweight MCP proxy client for remote Mimir context servers — no repos, no models, no indexing needed"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = "MIT"
 keywords = ["mcp", "context", "code", "llm", "proxy", "mimir"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -25,8 +24,8 @@ classifiers = [
 ]
 
 dependencies = [
-    "aiohttp>=3.9",
-    "typer>=0.9",
+    "aiohttp>=3.14.3",
+    "typer>=0.27.2",
 ]
 
 [project.urls]

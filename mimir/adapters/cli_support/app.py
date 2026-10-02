@@ -49,9 +49,6 @@ max_file_size_kb = 500
 [embeddings]
 model = "local:all-MiniLM-L6-v2"
 
-[vector_db]
-backend = "chroma"
-
 [retrieval]
 default_beam_width = 3
 default_token_budget = 8000

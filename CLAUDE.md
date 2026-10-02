@@ -15,6 +15,10 @@ pip install -e ".[dev]"
 # Run tests (the venv lives at ./.venv — activate it or call it directly)
 .venv/bin/pytest
 # or: source .venv/bin/activate && pytest
+.venv/bin/pytest tests/test_guardrail_service.py -k test_name   # Single test/module
+
+# No linter or formatter is configured (no ruff/black/mypy). Tests are the only gate.
+# pytest runs in asyncio_mode = "auto" — async tests need no @pytest.mark.asyncio.
 
 # CLI usage
 mimir init              # Create mimir.toml config
@@ -48,10 +52,10 @@ Mimir-Approved-Reason: legal signoff ticket #4821
 
 Workflow:
 
-1. CI fails on a BLOCK violation. PR comment lists the failing rule ids.
+1. `mimir guardrail check` (local run or pre-commit hook) fails on a BLOCK violation and lists the failing rule ids.
 2. Someone runs `mimir guardrail approve <rule-ids> --reason "..."` on the
    PR branch. This creates an empty commit with the trailer.
-3. Push. CI re-runs, reads HEAD trailers, clears the matching BLOCKs.
+3. Re-run the check; it reads HEAD trailers and clears the matching BLOCKs. (Repo CI does not run guardrails.)
 4. Any subsequent commit without the trailer invalidates the approval because
    HEAD has moved. No `revoke` command is needed.
 
@@ -73,18 +77,18 @@ Services (business logic: indexing, retrieval, temporal, quality, intent, sessio
     ↓
 Domain (core models: CodeGraph, Node, Edge, Config, Session — all frozen dataclasses/enums)
     ↓
-Ports (protocol interfaces: Parser, Embedder, VectorStore, GraphStore, SessionStore, LLMClient)
+Ports (protocol interfaces: Parser, Embedder, VectorStore, GraphStore, SessionStore)
     ↓
-Infra (concrete implementations: tree-sitter, sentence-transformers/jina, SQLite, ChromaDB, LiteLLM)
+Infra (concrete implementations: tree-sitter, ONNX Runtime embeddings (local) / Jina API, SQLite, in-memory NumPy vector index)
 ```
 
 ### Key Layers
 
 - **`mimir/domain/`** — Immutable core: `models.py` (NodeKind/EdgeKind enums, Node/Edge), `graph.py` (NetworkX-backed CodeGraph), `config.py` (TOML-mapped dataclasses), `guardrails.py` (Rule/Violation/ChangeSet/GuardrailResult)
 - **`mimir/ports/`** — Protocol interfaces for dependency injection boundaries
-- **`mimir/services/`** — All business logic. Heaviest files: `indexing.py` (parse→graph→embed pipeline), `retrieval.py` (query→seed→expand→rank→budget-fit), `guardrail.py` (rule evaluation engine), `diff_analyzer.py` (git diff→ChangeSet), `agent_policy.py` (bounded autonomy)
-- **`mimir/infra/`** — Pluggable implementations: `parsers/tree_sitter.py`, `embedders/local.py`+`jina.py`, `stores/sqlite_graph.py`, `vector_stores/numpy_store.py`+`chroma.py`
-- **`mimir/adapters/`** — External interfaces: `cli.py` (Typer entry point), `mcp_server.py` (MCP stdio), `http_server.py` (REST API)
+- **`mimir/services/`** — All business logic (19 modules). Core pipeline: `indexing.py` (parse→graph→embed), `retrieval.py` (query→seed→expand→rank→budget-fit), `summarizer.py`, `graph_linker.py` (cross-file reference resolution). Ranking signals: `intent.py` (query classification), `quality.py`, `temporal.py`. Guardrails: `guardrail.py` (rule engine), `guardrail_report.py`, `guardrail_trailers.py` (approval trailers), `diff_analyzer.py` (git diff→ChangeSet), `agent_policy.py` (bounded autonomy). Also `impact.py` (blast-radius reverse-tracing), `session.py` (dedup w/ exponential decay), `write_context.py` (write-path bundles), `catalog.py` (Backstage), `watcher.py` (live re-index)
+- **`mimir/infra/`** — Pluggable implementations: `parsers/tree_sitter.py`, `embedders/local.py`+`jina.py`, `stores/sqlite_graph.py`+`sqlite_session.py`, `vector_stores/numpy_store.py` (in-memory, rebuilt from `graph.db` embeddings on startup)
+- **`mimir/adapters/`** — External interfaces: `cli.py` (Typer entry point) + `cli_support/`, `mcp_server.py` (MCP stdio), `remote_mcp.py` (proxy to remote server), `http_server.py` (REST API), `web/server.py` (Web Inspector UI), plus `ci/` (GitHub Action) and `hooks/` (pre-commit) integration assets
 - **`mimir/container.py`** — Wires all layers together via DI
 
 ### Retrieval Pipeline
@@ -95,9 +99,15 @@ Infra (concrete implementations: tree-sitter, sentence-transformers/jina, SQLite
 
 1. Tree-sitter parse → 2. Build node/edge graph → 3. Cross-file reference resolution → 4. Heuristic summarization → 5. Embedding → 6. Persist to SQLite + vector store. Supports incremental indexing via git diff.
 
+## CI
+
+`.github/workflows/ci.yml` runs on PRs and pushes to `main`/`develop` and does only two things: `pytest --tb=short -q` on Python 3.11/3.12/3.13, and build verification (`python -m build` for the server and `client/` packages + `twine check --strict`). Guardrail checks are not run in CI; use `mimir guardrail check` locally or via the pre-commit hook.
+
+`.github/workflows/publish.yml` releases on `v*` tag pushes only: tests → build → publish both packages to PyPI (trusted publishing, `pypi` environment) → GitHub Release with the dists attached. Versions come from the git tag via setuptools-scm.
+
 ## Configuration
 
-Primary config: `mimir.toml` (TOML). Key sections: `[[repos]]`, `[indexing]`, `[embeddings]`, `[retrieval]`, `[temporal]`, `[session]`, `[vector_db]`, `[llm]`.
+Primary config: `mimir.toml` (TOML). Key sections: `[[repos]]`, `[indexing]`, `[embeddings]`, `[retrieval]`, `[temporal]`, `[session]`, `[watcher]`.
 
 `mimir.toml` indexes the Mimir source itself (used for both development and CI).
 
@@ -108,7 +118,7 @@ Guardrails config: `mimir-rules.yaml` (architectural rules) and `mimir-agent-pol
 Default location: `.mimir/`, split into two subfolders:
 
 - **`.mimir/project/`** — tracked in git. Contains `graph.db` (the code graph). Committing this lets CI skip re-indexing and lets new developers get a working context engine on clone.
-- **`.mimir/session/`** — ignored by git. Contains `sessions.db` (session state), `models/` (downloaded embedding weights), `chroma/` (derived vector store). Anything personal or re-derivable lives here.
+- **`.mimir/session/`** — ignored by git. Contains `sessions.db` (session state), `models/` (downloaded ONNX embedding models). Anything personal or re-derivable lives here.
 
 Run `mimir index` and commit `.mimir/project/graph.db` after significant code changes.
 

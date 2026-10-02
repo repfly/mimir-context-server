@@ -25,14 +25,6 @@ class SummaryMode(str, Enum):
     HEURISTIC = "heuristic"
 
 
-@unique
-class VectorBackend(str, Enum):
-    """Supported vector-store backends."""
-
-    CHROMA = "chroma"
-    NUMPY = "numpy"
-
-
 # ---------------------------------------------------------------------------
 # Sub-configs
 # ---------------------------------------------------------------------------
@@ -103,13 +95,6 @@ class IndexingConfig:
 
 
 @dataclass(frozen=True)
-class LlmConfig:
-    model: str = "claude-haiku-4-5-20251001"
-    api_key_env: Optional[str] = None
-    api_base: Optional[str] = None
-
-
-@dataclass(frozen=True)
 class EmbeddingConfig:
     model: str = "jina-embeddings-v2-base-code"
     api_key_env: Optional[str] = None
@@ -122,19 +107,6 @@ class EmbeddingConfig:
             raise ConfigError("embedding batch_size must be positive")
         if self.max_concurrent_batches < 1:
             raise ConfigError("embedding max_concurrent_batches must be >= 1")
-
-
-@dataclass(frozen=True)
-class VectorDbConfig:
-    backend: VectorBackend = VectorBackend.CHROMA
-    persist_directory: Optional[str] = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.backend, VectorBackend):
-            try:
-                object.__setattr__(self, "backend", VectorBackend(self.backend))
-            except ValueError as exc:
-                raise ConfigError(f"Invalid vector_db.backend: {self.backend!r}") from exc
 
 
 @dataclass(frozen=True)
@@ -214,9 +186,7 @@ class MimirConfig:
 
     cross_repo: CrossRepoConfig = field(default_factory=CrossRepoConfig)
     indexing: IndexingConfig = field(default_factory=IndexingConfig)
-    llm: LlmConfig = field(default_factory=LlmConfig)
     embeddings: EmbeddingConfig = field(default_factory=EmbeddingConfig)
-    vector_db: VectorDbConfig = field(default_factory=VectorDbConfig)
     retrieval: RetrievalConfig = field(default_factory=RetrievalConfig)
     temporal: TemporalConfig = field(default_factory=TemporalConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
@@ -235,7 +205,7 @@ class MimirConfig:
     # Layout: .mimir/ is split into two subfolders
     #   project/  — shared data tracked in git (graph.db)
     #   session/  — personal / derived data ignored by git
-    #               (sessions.db, embedding model cache, chroma store)
+    #               (sessions.db, embedding model cache)
     # ------------------------------------------------------------------
 
     @property
@@ -251,13 +221,13 @@ class MimirConfig:
     @classmethod
     def load(cls, path: Path) -> MimirConfig:
         """Parse a ``mimir.toml`` file into a validated config."""
-        import tomli
+        import tomllib
 
         if not path.is_file():
             raise ConfigError(f"Config file not found: {path}")
 
         with open(path, "rb") as f:
-            raw = tomli.load(f)
+            raw = tomllib.load(f)
 
         try:
             repos = [
@@ -276,13 +246,6 @@ class MimirConfig:
 
             # Resolve relative paths in sub-configs against config file dir
             config_dir = path.parent
-
-            vector_db = _parse_section(VectorDbConfig, raw.get("vector_db", {}))
-            if vector_db.persist_directory and not Path(vector_db.persist_directory).is_absolute():
-                object.__setattr__(
-                    vector_db, "persist_directory",
-                    str(config_dir.joinpath(vector_db.persist_directory).resolve()),
-                )
 
             embeddings = _parse_section(EmbeddingConfig, raw.get("embeddings", {}))
             if embeddings.cache_dir and not Path(embeddings.cache_dir).is_absolute():
@@ -303,9 +266,7 @@ class MimirConfig:
                 data_dir=data_dir,
                 cross_repo=_parse_section(CrossRepoConfig, raw.get("cross_repo", {})),
                 indexing=_parse_section(IndexingConfig, raw.get("indexing", {})),
-                llm=_parse_section(LlmConfig, raw.get("llm", {})),
                 embeddings=embeddings,
-                vector_db=vector_db,
                 retrieval=_parse_section(RetrievalConfig, raw.get("retrieval", {})),
                 temporal=_parse_section(TemporalConfig, raw.get("temporal", {})),
                 session=_parse_section(SessionConfig, raw.get("session", {})),
