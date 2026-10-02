@@ -9,7 +9,7 @@ from mimir.adapters.http.app import _build_app
 from mimir.adapters.http.state import HttpServerState
 from mimir.adapters.web.routes import register_routes as register_web_routes
 from mimir.adapters.web.state import WebServerState
-from mimir.domain.config import EmbeddingConfig, MimirConfig, RepoConfig, VectorDbConfig
+from mimir.domain.config import EmbeddingConfig, MimirConfig, RepoConfig
 from mimir.domain.errors import NoActiveIndexError
 from mimir.domain.graph import CodeGraph
 from mimir.domain.models import Node, NodeKind
@@ -29,7 +29,6 @@ def _config(tmp_path) -> MimirConfig:
         repos=[RepoConfig(name="repo", path=repo, language_hint="python")],
         data_dir=tmp_path / ".mimir",
         embeddings=EmbeddingConfig(model="local:test"),
-        vector_db=VectorDbConfig(backend="numpy"),
     )
 
 
@@ -191,7 +190,6 @@ def test_query_runtime_rejects_embedding_model_mismatch(tmp_path, monkeypatch: p
         repos=cfg.repos,
         data_dir=cfg.data_dir,
         embeddings=EmbeddingConfig(model="local:other"),
-        vector_db=VectorDbConfig(backend="numpy"),
     )
     with pytest.raises(Exception, match="embedding model mismatch"):
         QueryRuntime(mismatched)

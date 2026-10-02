@@ -25,9 +25,6 @@ concurrency = 10
 model = "all-mpnet-base-v2"  # local, offline, no API keys needed
 batch_size = 64
 
-[vector_db]
-backend = "numpy"            # numpy (in-process) | chroma (persistent)
-
 [retrieval]
 default_beam_width = 3
 default_token_budget = 8000
@@ -53,8 +50,7 @@ topic_tracking_alpha = 0.3
 | `indexing` | `summary_mode` | `heuristic` | `none` = raw code only; `heuristic` = signatures, docstrings, and dependency info |
 | `indexing` | `max_file_size_kb` | `500` | Skip files larger than this |
 | `indexing` | `concurrency` | `10` | Parallel file parsing limit |
-| `embeddings` | `model` | `jina-embeddings-v2-base-code` | Any sentence-transformers model or Jina API model |
-| `vector_db` | `backend` | `numpy` | `numpy` for dev/small projects; `chroma` for persistent production use |
+| `embeddings` | `model` | `jina-embeddings-v2-base-code` | Any sentence-transformers or Jina model that ships an ONNX export (run locally), or `api:<model>` for the Jina API |
 | `retrieval` | `default_token_budget` | `8000` | Maximum tokens per context bundle |
 | `retrieval` | `expansion_hops` | `2` | How many graph hops to expand from seed nodes |
 | `retrieval` | `hybrid_alpha` | `0.7` | Weight between semantic (1.0) and BM25 keyword (0.0) search |

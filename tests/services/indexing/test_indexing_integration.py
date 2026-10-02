@@ -24,7 +24,6 @@ from mimir.domain.config import (
     IndexingConfig,
     MimirConfig,
     RepoConfig,
-    VectorDbConfig,
 )
 from mimir.domain.graph import CodeGraph
 from mimir.domain.models import EdgeKind, NodeKind, SYMBOL_KINDS
@@ -142,7 +141,6 @@ def mimir_config(tmp_path: Path, repo_on_disk: Path) -> MimirConfig:
             detect_shared_imports=True,
         ),
         embeddings=EmbeddingConfig(batch_size=64),
-        vector_db=VectorDbConfig(backend="numpy"),
     )
 
 

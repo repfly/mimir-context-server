@@ -15,9 +15,9 @@ Services (business logic: indexing, retrieval, temporal, quality, intent, sessio
     ↓
 Domain (core models: CodeGraph, Node, Edge, Config, Session — all frozen dataclasses/enums)
     ↓
-Ports (protocol interfaces: Parser, Embedder, VectorStore, GraphStore, SessionStore, LLMClient)
+Ports (protocol interfaces: Parser, Embedder, VectorStore, GraphStore, SessionStore)
     ↓
-Infra (concrete implementations: tree-sitter, sentence-transformers/jina, SQLite, ChromaDB, LiteLLM)
+Infra (concrete implementations: tree-sitter, ONNX Runtime embeddings (local) / Jina API, SQLite, in-memory NumPy vector index)
 ```
 
 ## Project Structure
@@ -27,7 +27,7 @@ Infra (concrete implementations: tree-sitter, sentence-transformers/jina, SQLite
 │   ├── domain/                 # Core models, config, graph, catalog, guardrails, errors
 │   ├── ports/                  # Interface definitions (embedder, parser, stores)
 │   ├── services/               # Business logic (indexing, retrieval, catalog, impact, guardrail, temporal, session, quality)
-│   ├── infra/                  # Implementations (tree-sitter, embedders, SQLite, ChromaDB)
+│   ├── infra/                  # Implementations (tree-sitter, embedders, SQLite, NumPy vector index)
 │   ├── adapters/               # External interfaces (CLI, MCP, HTTP, web UI)
 │   ├── runtime.py              # IndexerRuntime and QueryRuntime composition
 │   └── container.py            # Legacy local composition path
@@ -62,7 +62,6 @@ Mimir stores all index data in a local directory (default `.mimir/`, configurabl
     ├── sessions.db             #   SQLite: session state for deduplication
     ├── feedback.db             #   retrieval feedback signals
     ├── models/                 #   downloaded embedding weights
-    ├── chroma/                 #   ChromaDB data (only if backend = "chroma")
     └── guardrail_audit.jsonl   #   Guardrail check audit log (if enabled)
 ```
 

@@ -32,9 +32,9 @@ class WorkspaceRegistry:
         """Load and return the raw TOML dict, or an empty dict if not found."""
         if not self._path.exists():
             return {}
-        import tomli
+        import tomllib
         with open(self._path, "rb") as f:
-            return tomli.load(f)
+            return tomllib.load(f)
 
     def list(self) -> dict[str, Path]:
         """Return all registered workspaces as {name: config_path}."""

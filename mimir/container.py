@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from mimir.domain.config import MimirConfig, VectorBackend
+from mimir.domain.config import MimirConfig
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +49,6 @@ class Container:
             config.session_dir / "feedback.db",
             smoothing=config.feedback.score_smoothing,
         )
-
-        # LLM client (used by the `ask` CLI command for interactive Q&A)
-        self.llm_client = self._build_llm_client()
 
         # Services ------------------------------------------------------
 
@@ -133,14 +130,14 @@ class Container:
                 )
             except Exception as exc:
                 logger.warning("Jina API embedder init failed (%s), falling back to local", exc)
-                # Default: run locally via sentence-transformers
+                # Default: run locally via ONNX Runtime
                 from mimir.infra.embedders.local import LocalEmbedder
                 model_name = model.removeprefix("local:") if model.startswith("local:") else model
                 cache_dir = self.config.embeddings.cache_dir or str(self.config.session_dir / "models")
                 logger.info("Using local embedder: %s (cache: %s)", model_name, cache_dir)
                 return LocalEmbedder(model_name=model_name, cache_dir=cache_dir)
         else:
-            # Default: run locally via sentence-transformers
+            # Default: run locally via ONNX Runtime
             from mimir.infra.embedders.local import LocalEmbedder
             model_name = model.removeprefix("local:") if model.startswith("local:") else model
             cache_dir = self.config.embeddings.cache_dir or str(self.config.session_dir / "models")
@@ -148,24 +145,8 @@ class Container:
             return LocalEmbedder(model_name=model_name, cache_dir=cache_dir)
 
     def _build_vector_store(self):
-        backend = self.config.vector_db.backend
-        if backend is VectorBackend.CHROMA:
-            from mimir.infra.vector_stores.chroma import ChromaVectorStore
-            return ChromaVectorStore(
-                persist_directory=self.config.vector_db.persist_directory
-                or str(self.config.session_dir / "chroma"),
-            )
-        else:
-            from mimir.infra.vector_stores.numpy_store import NumpyVectorStore
-            return NumpyVectorStore()
-
-    def _build_llm_client(self):
-        from mimir.infra.llm.litellm_client import LiteLlmClient
-        return LiteLlmClient(
-            model=self.config.llm.model,
-            max_concurrent=self.config.indexing.concurrency,
-            api_base=self.config.llm.api_base,
-        )
+        from mimir.infra.vector_stores.numpy_store import NumpyVectorStore
+        return NumpyVectorStore()
 
     def load_graph(self, *, force_reload: bool = False):
         """Load the persisted graph and hydrate the vector store."""
@@ -205,9 +186,6 @@ class Container:
             self._graph = None  # invalidate in-memory cache
             cleared.append("graph")
 
-            # Reset the vector store through its live client so file handles stay valid.
-            # We must NOT use shutil.rmtree() here while the store's SQLite client is open,
-            # because deleting chroma files under an active handle puts SQLite into readonly mode.
             self.vector_store.reset()
             cleared.append("vector_store")
 

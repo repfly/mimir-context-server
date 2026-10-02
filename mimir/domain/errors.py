@@ -2,7 +2,7 @@
 
 Every infrastructure adapter catches library-specific exceptions and re-raises
 as the appropriate Mimir error with context.  The application layer never sees
-``chromadb.errors.*`` or ``sqlite3.OperationalError``.
+``sqlite3.OperationalError`` or library-specific errors.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ class EmbeddingError(IndexingError):
 
 
 class StorageError(MimirError):
-    """Database read/write failure (SQLite, ChromaDB, etc.)."""
+    """Database read/write failure (SQLite, etc.)."""
 
 
 class RetrievalError(MimirError):

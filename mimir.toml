@@ -20,9 +20,6 @@ max_file_size_kb = 500
 model = "all-mpnet-base-v2"
 batch_size = 64
 
-[vector_db]
-backend = "chroma"
-
 [retrieval]
 default_beam_width = 3
 default_token_budget = 8000

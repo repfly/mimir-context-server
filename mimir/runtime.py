@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from mimir.domain.config import MimirConfig, SummaryMode, VectorBackend
+from mimir.domain.config import MimirConfig, SummaryMode
 from mimir.domain.errors import NoActiveIndexError, StorageError
 from mimir.domain.graph import CodeGraph
 from mimir.domain.index_state import IndexJob, IndexJobKind, IndexVersion
@@ -81,13 +81,6 @@ def _build_embedder(config: MimirConfig):
 
 
 def _build_vector_store(config: MimirConfig):
-    if config.vector_db.backend is VectorBackend.CHROMA:
-        from mimir.infra.vector_stores.chroma import ChromaVectorStore
-
-        return ChromaVectorStore(
-            persist_directory=config.vector_db.persist_directory
-            or str(config.session_dir / "chroma"),
-        )
     return NumpyVectorStore()
 
 

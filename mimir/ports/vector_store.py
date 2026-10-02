@@ -19,7 +19,7 @@ class VectorSearchResult:
 class VectorStore(Protocol):
     """Interface for vector similarity search.
 
-    Implementations: ``ChromaVectorStore``, ``NumpyVectorStore``.
+    Implementation: ``NumpyVectorStore``.
     """
 
     def upsert(
@@ -76,7 +76,7 @@ class VectorStore(Protocol):
         """Return the subset of ``ids`` that already exist in the store.
 
         Used by the container's hydration path to skip re-upserting vectors
-        that persistent backends (e.g. Chroma) already hold on disk.
+        the store already holds.
         Implementations should probe only the given ids, not scan the whole
         store.
         """

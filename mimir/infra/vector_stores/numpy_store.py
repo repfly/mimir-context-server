@@ -1,8 +1,8 @@
 """NumPy-based in-memory vector store.
 
-Lightweight alternative to ChromaDB for development and small codebases.
-Stores all vectors in memory using NumPy arrays.  Supports metadata
-filtering and cosine similarity search.
+Stores all vectors in memory using NumPy arrays and is rebuilt from the
+embeddings in graph.db on startup.  Supports metadata filtering and exact
+(brute-force) cosine similarity search.
 """
 
 from __future__ import annotations
@@ -27,6 +27,13 @@ class NumpyVectorStore:
         self._metadatas: list[dict[str, Any]] = []
         self._documents: list[Optional[str]] = []
         self._id_to_idx: dict[str, int] = {}
+        # Derived caches, invalidated on every mutation
+        self._unit: Optional[np.ndarray] = None  # row-normalized embeddings
+        self._columns: dict[str, np.ndarray] = {}  # metadata key -> values per row
+
+    def _invalidate(self) -> None:
+        self._unit = None
+        self._columns.clear()
 
     def upsert(
         self,
@@ -39,33 +46,56 @@ class NumpyVectorStore:
             raise StorageError(
                 f"ids ({len(ids)}) and embeddings ({len(embeddings)}) length mismatch"
             )
+        if not ids:
+            return
 
         metas = metadatas or [{}] * len(ids)
         docs = documents or [None] * len(ids)
-        new_vecs = np.array(embeddings, dtype=np.float32)
+        new_vecs = np.asarray(embeddings, dtype=np.float32)
 
+        # Updates are written in place; appends are collected and stacked once
+        # (row-by-row vstack would make bulk loads quadratic).
+        update_rows: list[int] = []
+        update_idx: list[int] = []
+        append_rows: list[int] = []
         for i, vec_id in enumerate(ids):
-            if vec_id in self._id_to_idx:
-                # Update in-place
-                idx = self._id_to_idx[vec_id]
-                if self._embeddings is not None:
-                    self._embeddings[idx] = new_vecs[i]
-                self._metadatas[idx] = metas[i]
-                self._documents[idx] = docs[i]
-            else:
-                # Append
+            idx = self._id_to_idx.get(vec_id)
+            if idx is None:
                 idx = len(self._ids)
                 self._ids.append(vec_id)
                 self._metadatas.append(metas[i])
                 self._documents.append(docs[i])
                 self._id_to_idx[vec_id] = idx
-
-                if self._embeddings is None:
-                    self._embeddings = new_vecs[i : i + 1]
+                append_rows.append(i)
+            else:
+                self._metadatas[idx] = metas[i]
+                self._documents[idx] = docs[i]
+                if idx < self._stored_rows():
+                    update_idx.append(idx)
+                    update_rows.append(i)
                 else:
-                    self._embeddings = np.vstack([self._embeddings, new_vecs[i : i + 1]])
+                    # Duplicate id earlier in this same batch — last write wins
+                    append_rows[idx - self._stored_rows()] = i
 
+        if update_idx:
+            self._embeddings[update_idx] = new_vecs[update_rows]  # type: ignore[index]
+        if append_rows:
+            added = new_vecs[append_rows]
+            self._embeddings = added if self._embeddings is None else np.vstack([self._embeddings, added])
+
+        self._invalidate()
         logger.debug("Upserted %d vectors (total: %d)", len(ids), len(self._ids))
+
+    def _stored_rows(self) -> int:
+        return 0 if self._embeddings is None else len(self._embeddings)
+
+    def _column(self, key: str) -> np.ndarray:
+        col = self._columns.get(key)
+        if col is None:
+            col = np.empty(len(self._metadatas), dtype=object)
+            col[:] = [m.get(key) for m in self._metadatas]
+            self._columns[key] = col
+        return col
 
     def search(
         self,
@@ -76,23 +106,22 @@ class NumpyVectorStore:
         if self._embeddings is None or len(self._ids) == 0:
             return []
 
-        query = np.array(query_embedding, dtype=np.float32)
-
-        # Cosine similarity
-        norms = np.linalg.norm(self._embeddings, axis=1)
+        query = np.asarray(query_embedding, dtype=np.float32)
         query_norm = np.linalg.norm(query)
         if query_norm == 0:
             return []
 
-        similarities = self._embeddings @ query / (norms * query_norm + 1e-10)
+        # Cosine similarity against cached unit vectors
+        if self._unit is None:
+            norms = np.linalg.norm(self._embeddings, axis=1, keepdims=True)
+            self._unit = self._embeddings / (norms + 1e-10)
+        similarities = self._unit @ (query / query_norm)
 
         # Apply metadata filter
         if where:
             mask = np.ones(len(self._ids), dtype=bool)
             for key, value in where.items():
-                for i, meta in enumerate(self._metadatas):
-                    if meta.get(key) != value:
-                        mask[i] = False
+                mask &= self._column(key) == value
             similarities = np.where(mask, similarities, -np.inf)
 
         # Top-k
@@ -132,6 +161,7 @@ class NumpyVectorStore:
 
         # Rebuild index
         self._id_to_idx = {vid: i for i, vid in enumerate(self._ids)}
+        self._invalidate()
 
     def get_existing_ids(self, ids: list[str]) -> set[str]:
         return {i for i in ids if i in self._id_to_idx}
@@ -145,3 +175,4 @@ class NumpyVectorStore:
         self._metadatas.clear()
         self._documents.clear()
         self._id_to_idx.clear()
+        self._invalidate()

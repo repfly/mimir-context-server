@@ -123,8 +123,5 @@ def _write_config(tmp_path):
 
         [embeddings]
         model = "local:test"
-
-        [vector_db]
-        backend = "numpy"
     """))
     return config_path
