@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from aiohttp.test_utils import make_mocked_request
@@ -240,7 +240,8 @@ async def _request(app, method: str, path: str, *, json_body: dict | None = None
     import json
     from aiohttp import streams
 
-    payload = streams.StreamReader(protocol=SimpleNamespace(_reading_paused=False), limit=2**16)
+    # Mock protocol: aiohttp>=3.14 calls flow-control hooks (e.g. resume_reading) on it.
+    payload = streams.StreamReader(protocol=Mock(_reading_paused=False), limit=2**16)
     if json_body is not None:
         payload.feed_data(json.dumps(json_body).encode("utf-8"))
     payload.feed_eof()

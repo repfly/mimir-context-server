@@ -22,11 +22,11 @@ pip install -e ".[dev]"
 
 # CLI usage
 mimir init              # Create mimir.toml config
-mimir index             # Build/update semantic code graph
-mimir search "query"    # Search and assemble context
-mimir serve             # Start MCP server (stdio)
-mimir serve --http      # Start shared HTTP server (port 8421)
-mimir quality           # Analyze graph connectivity gaps
+mimir indexer run             # Build and publish an index version
+mimir query search "query"    # Search the active published index
+mimir query serve             # Start MCP server (stdio)
+mimir query serve --http      # Start shared HTTP server (port 8421)
+mimir query status            # Show the active index version and graph counts
 
 # Guardrails
 mimir guardrail init    # Generate example rules + agent policy
@@ -120,7 +120,7 @@ Default location: `.mimir/`, split into two subfolders:
 - **`.mimir/project/`** — tracked in git. Contains `graph.db` (the code graph). Committing this lets CI skip re-indexing and lets new developers get a working context engine on clone.
 - **`.mimir/session/`** — ignored by git. Contains `sessions.db` (session state), `models/` (downloaded ONNX embedding models). Anything personal or re-derivable lives here.
 
-Run `mimir index` and commit `.mimir/project/graph.db` after significant code changes.
+Run `mimir indexer run` and commit `.mimir/project/graph.db` after significant code changes.
 
 ## Docker
 
